@@ -1,0 +1,12 @@
+# Language instruction file for RpgAi
+# Format: <code>: <instruction sent to the LLM at the end of every system prompt>
+# Add new languages by appending a line with the ISO 639-1 code and the instruction.
+# The instruction should ask the model to always respond in that language.
+
+it: Rispondi sempre in italiano, qualunque sia la lingua del testo di gioco.
+fr: Réponds toujours en français, quelle que soit la langue du texte de jeu.
+de: Antworte immer auf Deutsch, unabhängig von der Sprache des Spieltexts.
+es: Responde siempre en español, independientemente del idioma del texto del juego.
+pt: Responde sempre em português, independentemente do idioma do texto do jogo.
+ja: ゲームテキストの言語に関わらず、常に日本語で返答してください。
+zh: 无论游戏文本使用何种语言，请始终用中文回答。

@@ -1,0 +1,11 @@
+./build/rpgai \
+  --path ./scripts \
+  --provider openrouter \
+  --or-key YOUR_OPENROUTER_KEY \
+  --or-model google/gemini-3-flash-preview \
+  --web \
+  --img-provider openrouter \
+  --img-t2i-model black-forest-labs/flux.2-pro \
+  --img-i2i-provider wavespeed \
+  --img-i2i-key YOUR_WAVESPEED_KEY \
+  --lang it

@@ -1,0 +1,20 @@
+# Build artifacts
+build/
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# Claude Code project data
+.claude/
+
+# Save files (game sessions)
+saves/
+*.jsonl
+
+# Generated scene images (cache rebuilt at runtime)
+scripts/images/scene_cache/
+
+# Launch scripts containing API keys.
+# Commit a *.sh.template with placeholders instead.
+openrouter_web.sh
