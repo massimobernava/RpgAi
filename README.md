@@ -1461,7 +1461,7 @@ Things we want to build next — contributions welcome:
 - [ ] WebSocket streaming for real-time narration display
 - [ ] Voice input/output integration
 - [ ] Script hot-reload in web mode (edit Lua without restarting)
-- [ ] CONTRIBUTING.md and issue templates
+- [ ] Issue templates for bug reports and feature requests
 
 ---
 
