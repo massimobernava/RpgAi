@@ -356,6 +356,9 @@ NARRATIVE STYLE:
 - Keep narration to 3-5 sentences. Atmospheric, slightly ominous.
 - Describe sensory details: sounds, smells, the weight of darkness.
 - When combat occurs, make it feel dangerous even if the enemy is weak.
+- If the player is hit in combat, set hp_change to a negative value (-1 to -3).
+- If the player avoids all damage, set hp_change to 0.
+- The ghost scribe is NOT hostile — do not deal damage when the player interacts with it.
 - Do not invent new locations, items or NPCs beyond what is defined.
 
 CURRENT LOCATION: %s
@@ -391,12 +394,14 @@ function get_json_schema()
                                   "enum": ["", "tomb_entrance", "burial_hall", "guard_room",
                                            "ritual_chamber", "kings_tomb", "treasury", "outside"],
                                   "description": "location_id if the player moved, empty string otherwise" },
-            "avanza_tempo":     { "type": "integer", "minimum": 0, "maximum": 2,
+            "time_advance":     { "type": "integer", "minimum": 0, "maximum": 2,
                                   "description": "hours that pass: 0=quick action, 1=exploration, 2=long ritual" },
             "picked_up":        { "type": "array",
                                   "items": { "type": "string",
                                              "enum": ["iron_key", "silver_coin", "ritual_text", "kings_sword"] },
                                   "description": "item ids found this turn, empty array if none" },
+            "hp_change":        { "type": "integer", "minimum": -5, "maximum": 0,
+                                  "description": "HP the player loses this turn: 0 = no damage, -1 to -3 = hit in combat, -4 to -5 = severe hit. Never positive." },
             "npc_defeated":     { "type": "string",
                                   "description": "npc_id if an NPC was defeated this turn, empty string otherwise" },
             "seal_broken":      { "type": "boolean",
@@ -441,8 +446,8 @@ function process_ai_response(reply)
     end
 
     -- Advance time
-    if type(data.avanza_tempo) == "number" and data.avanza_tempo > 0 then
-        state.hour = state.hour + data.avanza_tempo
+    if type(data.time_advance) == "number" and data.time_advance > 0 then
+        state.hour = state.hour + data.time_advance
         -- Check for dawn (tomb seals)
         if state.hour >= 30 and not state.game_over then
             if not has_item("kings_sword") then
@@ -469,6 +474,21 @@ function process_ai_response(reply)
                     state.location_flags.guard_room_locked = false
                 end
             end
+        end
+    end
+
+    -- Apply HP damage
+    if type(data.hp_change) == "number" and data.hp_change < 0 then
+        state.player.health = state.player.health + data.hp_change
+        if state.player.health <= 0 then
+            state.player.health = 0
+            return {
+                success          = true,
+                narration        = narration .. "\n\nDarkness closes in. Your torch gutters and dies. "
+                                .. "The tomb claims another soul.",
+                game_over        = true,
+                game_over_reason = "DEFEAT — You fell in the tomb.",
+            }
         end
     end
 

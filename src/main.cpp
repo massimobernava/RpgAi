@@ -125,8 +125,8 @@ static std::string read_input(const std::string& prompt_str = "> ") {
     return line;
 }
 
-// Spinner semplice per operazioni LLM lunghe
-static void print_thinking(const std::string& msg = "Elaborazione...") {
+// Simple spinner for long LLM operations
+static void print_thinking(const std::string& msg = "Thinking...") {
     std::cout << ansi(C::DIM) << ansi(C::ITALIC) << "⟳  " << msg << ansi(C::RESET) << "\n" << std::flush;
 }
 
