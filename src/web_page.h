@@ -57,6 +57,17 @@ std::string main_page = R"HTML(<!DOCTYPE html>
                                  background: rgba(79,195,161,.1); }
   .list-empty { font-size: 11px; color: var(--dim); font-style: italic; padding: 2px 4px; }
 
+  /* ---- Command palette ---- */
+  #sb-commands-section { display: none; flex-direction: column; gap: 4px; flex-shrink: 0; }
+  #sb-commands-list { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+  #sb-commands-list li {
+    padding: 4px 8px; border-radius: var(--radius); cursor: pointer;
+    font-size: 11px; font-family: var(--mono); color: var(--accent2);
+    background: var(--hud-bg); border: 1px solid var(--border);
+    transition: border-color .15s, color .15s; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  #sb-commands-list li:hover { border-color: var(--accent2); color: var(--text); }
+
   /* Pulsanti */
   .btn { width: 100%; padding: 8px; border: none; border-radius: var(--radius);
          font-family: var(--mono); font-size: 12px; font-weight: 600;
@@ -163,6 +174,12 @@ std::string main_page = R"HTML(<!DOCTYPE html>
       <button id="btn-manualsave" class="btn btn-secondary">💾 Save now</button>
       <hr class="sb-sep">
       <button id="btn-quit" class="btn btn-ghost">✕ Quit game</button>
+      <!-- Command palette — populated by loadCommands() if script implements get_commands() -->
+      <div id="sb-commands-section">
+        <hr class="sb-sep">
+        <div class="sb-label">Comandi</div>
+        <ul id="sb-commands-list"></ul>
+      </div>
     </div>
   </div>
 
@@ -195,8 +212,10 @@ const saveList   = document.getElementById('save-list');
 const saveEmpty  = document.getElementById('save-empty');
 const secPre     = document.getElementById('section-pre');
 const secGame    = document.getElementById('section-game');
-const infoScript = document.getElementById('info-script');
-const infoSave   = document.getElementById('info-save');
+const infoScript    = document.getElementById('info-script');
+const infoSave      = document.getElementById('info-save');
+const sbCmdSection  = document.getElementById('sb-commands-section');
+const sbCmdList     = document.getElementById('sb-commands-list');
 
 /* ================================================================
    Stato UI
@@ -257,13 +276,14 @@ function showGameUI(scriptName, saveName) {
    ================================================================ */
 
 // Mostra un'immagine base64 nel log con didascalia opzionale
-function addImage(b64, caption, mime) {
+function addImage(b64, caption, mime, tooltip) {
   mime = mime || 'image/png';
   const wrap = document.createElement('div');
   wrap.className = 'msg msg-image';
   const img = document.createElement('img');
   img.src = 'data:' + mime + ';base64,' + b64;
   img.alt = caption || 'Scene';
+  if (tooltip) img.title = tooltip;
   wrap.appendChild(img);
   if (caption) {
     const cap = document.createElement('div');
@@ -277,7 +297,7 @@ function addImage(b64, caption, mime) {
 }
 
 // Polling su un job immagine finché non è done/error
-// onDone(b64, assetId) — onError(msg)
+// onDone(b64, assetId, prompt) — onError(msg)
 function pollImageJob(jobId, onDone, onError, intervalMs) {
   intervalMs = intervalMs || 2500;
   const timer = setInterval(async () => {
@@ -286,7 +306,7 @@ function pollImageJob(jobId, onDone, onError, intervalMs) {
       const data = await r.json();
       if (data.status === 'done') {
         clearInterval(timer);
-        onDone(data.image, data.asset_id || null);
+        onDone(data.image, data.asset_id || null, data.prompt || '');
       } else if (data.status === 'error') {
         clearInterval(timer);
         onError(data.error || 'Image generation error.');
@@ -333,9 +353,10 @@ async function handleImageResponse(data, placeholder, caption) {
   const hint  = data.warning ? '⚠ ' + data.warning : null;
 
   pollImageJob(jobId,
-    (b64, assetId) => {
+    (b64, assetId, prompt) => {
       const finalCaption = caption || (assetId ? 'Asset: ' + assetId : 'Generated scene');
-      const imgEl = addImage(b64, finalCaption + (hint ? '\n' + hint : ''));
+      const tooltip = (prompt ? prompt + '\n' : '') + 'ID: ' + jobId;
+      const imgEl = addImage(b64, finalCaption + (hint ? '\n' + hint : ''), undefined, tooltip);
       if (placeholder) placeholder.replaceWith(imgEl);
       log.scrollTop = log.scrollHeight;
     },
@@ -410,6 +431,39 @@ async function loadSaves() {
 }
 
 /* ================================================================
+   Command palette
+   GET /api/commands — optional; hides section if not implemented
+   ================================================================ */
+async function loadCommands() {
+  sbCmdSection.style.display = 'none';
+  sbCmdList.innerHTML = '';
+  try {
+    const r    = await fetch('/api/commands');
+    const data = await r.json();
+    if (!data.success || !data.commands || !data.commands.length) return;
+    data.commands.forEach(c => {
+      const li    = document.createElement('li');
+      li.textContent = c.label || c.cmd;
+      li.title       = c.desc || c.cmd;
+      li.onclick     = () => {
+        if (c.exec) {
+          inp.value = c.cmd;
+          inp.dispatchEvent(new Event('input'));
+          sendInput();
+        } else {
+          inp.value = c.cmd + ' ';
+          inp.dispatchEvent(new Event('input'));
+          inp.focus();
+          inp.setSelectionRange(inp.value.length, inp.value.length);
+        }
+      };
+      sbCmdList.appendChild(li);
+    });
+    sbCmdSection.style.display = 'flex';
+  } catch (_) {}
+}
+
+/* ================================================================
    NEW GAME
    POST /api/start → riceve welcome, entra in awaiting_init
    ================================================================ */
@@ -438,6 +492,7 @@ btnStart.addEventListener('click', async () => {
     gameState       = 'awaiting_init';
     inp.placeholder = 'Reply to the script (empty = use default)...';
     showGameUI(selectedScript, null);
+    loadCommands();
     setInputEnabled(true);
     inp.focus();
 
@@ -472,11 +527,74 @@ btnLoad.addEventListener('click', async () => {
       return;
     }
 
-    addMsg('msg-system', 'Game restored.');
     hud.textContent = data.display || '';
     gameState       = 'playing';
     inp.placeholder = 'What do you do?';
     showGameUI(data.script || selectedSave, selectedSave);
+    loadCommands();
+
+    // Correlate images with turns by timestamp, then replay chat with images inline.
+    // Turn timestamps: "YYYY-MM-DDTHH:MM:SSZ" (UTC)
+    // Image generated_at: "YYYYMMDD_HHMMSS" (local) — strip non-digits for comparison.
+    function normTs(s) { return s ? s.replace(/\D/g, '') : ''; }
+
+    const turns      = data.turns        || [];
+    // Server already filters cached_images to this session's date range.
+    const cachedImgs = data.cached_images || [];
+
+    // Map each image to the turn index after which it was generated.
+    // image goes after turn[i] if turn[i].timestamp <= img.ts < turn[i+1].timestamp
+    // image goes after last turn if img.ts >= last turn timestamp
+    // image goes before all turns (idx = -1) if img.ts < first turn timestamp
+    function assignImageToTurn(imgTs) {
+      if (turns.length === 0) return -1;
+      const nImg = normTs(imgTs);
+      for (let i = turns.length - 1; i >= 0; i--) {
+        if (normTs(turns[i].timestamp) <= nImg) return i;
+      }
+      return -1;
+    }
+
+    // Build map: turn index → [image, ...]
+    const imgAfterTurn = {};
+    for (const img of cachedImgs) {
+      const idx = assignImageToTurn(img.generated_at);
+      if (!imgAfterTurn[idx]) imgAfterTurn[idx] = [];
+      imgAfterTurn[idx].push(img);
+    }
+
+    // Async image loader — appends to log in order, with tooltip (prompt + file ID)
+    async function loadAndShowImages(imgList) {
+      for (const img of imgList) {
+        try {
+          const r2 = await fetch('/api/scene_image?file=' + encodeURIComponent(img.file));
+          const d2 = await r2.json();
+          if (d2.success) {
+            const tooltip = (img.prompt ? img.prompt + '\n' : '') + 'ID: ' + (img.cache_key || img.file);
+            addImage(d2.image, img.generated_at || 'Scene', d2.mime, tooltip);
+          }
+        } catch (_) {}
+      }
+    }
+
+    const replayAsync = async () => {
+      if (turns.length > 0) {
+        addMsg('msg-system', '── Storia precedente (' + turns.length + ' turni) ──');
+        // Images that predate all turns
+        if (imgAfterTurn[-1]) await loadAndShowImages(imgAfterTurn[-1]);
+        for (let i = 0; i < turns.length; i++) {
+          const t = turns[i];
+          if (t.player_input) addMsg('msg-player', t.player_input);
+          if (t.narration)    addMsg('msg-narration', t.narration);
+          if (imgAfterTurn[i]) await loadAndShowImages(imgAfterTurn[i]);
+        }
+        addMsg('msg-system', '── Fine storia precedente ──');
+      } else {
+        addMsg('msg-system', 'Partita ripristinata.');
+      }
+    };
+    replayAsync();
+
     setInputEnabled(true);
     inp.focus();
 
@@ -576,11 +694,22 @@ async function sendInput() {
     fetchOpts = { method: 'GET' };
   } else if (text.startsWith('/image')) {
     const partial = text.includes('--partial');
+    const parts   = text.trim().split(/\s+/);
+    const modeArg = (parts.length > 1 && !parts[1].startsWith('--')) ? parts[1] : '';
+    const mode    = ['regen', 'refine', 'fix', 'compose'].includes(modeArg) ? modeArg : '';
+    const instruction = (mode === 'fix' && parts.length > 2) ? parts.slice(2).join(' ') : '';
     endpoint  = '/api/image';
     fetchOpts = {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ partial })
+      body:    JSON.stringify({ partial, mode, instruction })
+    };
+  } else if (text.startsWith('/swap')) {
+    endpoint  = '/api/swap';
+    fetchOpts = {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ input: text })
     };
   } else if (text.startsWith('/generate_asset')) {
     const id = text.split(' ').slice(1).join(' ').trim();
@@ -621,10 +750,11 @@ async function sendInput() {
         // /show_asset — synchronous image already ready
         addImage(data.image, 'Asset: ' + (data.asset_id || text), data.mime);
       } else if (data.job_id !== undefined) {
-        // /image or /generate_asset — async, poll for result
+        // /image, /generate_asset, /swap — async, poll for result
         const ph  = addMsg('msg-system thinking', 'Generating image...');
         const cap = text.startsWith('/generate_asset')
           ? 'Asset: ' + text.split(' ').slice(1).join(' ')
+          : text.startsWith('/swap') ? 'Face swap'
           : 'Scene';
         await handleImageResponse(data, ph, cap);
       } else {

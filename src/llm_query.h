@@ -1,4 +1,24 @@
-std::string ollama_query(const std::string& system, 
+// Gemini (Google AI Studio) rejects schemas that contain "additionalProperties".
+// Strip it recursively before forwarding to any Google model via OpenRouter.
+static void strip_additional_properties(json& node) {
+    if (!node.is_object()) return;
+    node.erase("additionalProperties");
+    if (node.contains("properties") && node["properties"].is_object()) {
+        for (auto& [k, v] : node["properties"].items()) {
+            strip_additional_properties(v);
+        }
+    }
+    for (const char* key : {"items", "then", "else", "not"}) {
+        if (node.contains(key)) strip_additional_properties(node[key]);
+    }
+    for (const char* key : {"anyOf", "oneOf", "allOf"}) {
+        if (node.contains(key) && node[key].is_array()) {
+            for (auto& item : node[key]) strip_additional_properties(item);
+        }
+    }
+}
+
+std::string ollama_query(const std::string& system,
                          const std::vector<Message>& history, 
                          const std::string& prompt,
                          const std::string& format,
@@ -345,15 +365,19 @@ std::string openrouter_query(const std::string& system,
     body["messages"] = messages;
     body["safe_prompt"] = false;
 
-    // Structured output — same schema format as OpenAI
+    // Structured output — same schema format as OpenAI.
+    // Google models via OpenRouter reject "additionalProperties", so strip it.
     if (!format.empty()) {
         try {
+            json schema = json::parse(format);
+            bool is_google = (model.rfind("google/", 0) == 0);
+            if (is_google) strip_additional_properties(schema);
             body["response_format"] = {
                 {"type", "json_schema"},
                 {"json_schema", {
                     {"name", "response"},
-                    {"strict", true},
-                    {"schema", json::parse(format)}
+                    {"strict", !is_google},
+                    {"schema", schema}
                 }}
             };
         } catch (const std::exception& e) {

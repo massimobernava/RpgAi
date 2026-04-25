@@ -164,7 +164,15 @@ struct Config {
     int         imgWidth     = 1024;
     int         imgHeight    = 1024;
     int         imgSteps     = 28;
-    float       imgStrength  = 0.75f;  // --save-mode last|full
+    float       imgStrength  = 0.75f;
+    std::string imgLora;            // --img-lora
+    float       imgLoraScale = 1.0f; // --img-lora-scale
+
+    // Face-swap
+    std::string faceswapUrl;        // --faceswap-url (empty = disabled)
+
+    // Session tracking — set on first save, used to filter images on load
+    std::string sessionStart;       // ISO8601 UTC timestamp of first turn in this session
     int         maxHistory   = 30;
     int         maxRetries   = 3;
 
@@ -458,7 +466,11 @@ static json build_turn_json(const std::string& player_input,
                              const std::string& state_after,
                              const std::vector<Message>& history) {
     json j;
-    j["timestamp"]    = utc_timestamp();
+    std::string ts    = utc_timestamp();
+    if (cfg.sessionStart.empty()) cfg.sessionStart = ts;
+    j["timestamp"]    = ts;
+    j["session_start"] = cfg.sessionStart;
+    j["script"]       = cfg.script;
     j["player_input"] = player_input;
     j["llm_response"] = llm_response;
     j["narration"]    = narration;
@@ -528,6 +540,148 @@ bool load_session_from_jsonl(const std::string& filename,
 std::vector<Message> trim_history(const std::vector<Message>& history, int max_turns) {
     if (max_turns < 0 || (int)history.size() <= max_turns) return history;
     return std::vector<Message>(history.end() - max_turns, history.end());
+}
+
+// Returns [{player_input, narration}, ...] for chat replay on load.
+// FULL mode: reads every line. LAST mode: reconstructs from chat_history.
+static json load_turns_for_replay(const std::string& filename) {
+    json turns = json::array();
+    std::ifstream in(filename);
+    if (!in.is_open()) return turns;
+    std::string line;
+    std::vector<std::string> lines;
+    while (std::getline(in, line))
+        if (!line.empty()) lines.push_back(line);
+    if (lines.empty()) return turns;
+
+    if (lines.size() > 1) {
+        for (const auto& l : lines) {
+            try {
+                auto j = json::parse(l);
+                std::string narr = j.value("narration", "");
+                if (narr.empty()) continue;
+                json t;
+                t["player_input"] = j.value("player_input", "");
+                t["narration"]    = narr;
+                t["timestamp"]    = j.value("timestamp", "");
+                turns.push_back(t);
+            } catch (...) {}
+        }
+    } else {
+        try {
+            auto j = json::parse(lines[0]);
+            if (j.contains("chat_history") && j["chat_history"].is_array()) {
+                std::string pending_player;
+                for (const auto& msg : j["chat_history"]) {
+                    std::string role = msg.value("role", "");
+                    std::string pid  = msg.value("player_id", "");
+                    if (role == "user" && pid == "player") {
+                        pending_player = msg.value("content", "");
+                    } else if (role == "assistant" && pid == "gm") {
+                        std::string narr;
+                        try {
+                            auto jc = json::parse(msg.value("content", "{}"));
+                            narr = jc.value("narration", "");
+                        } catch (...) {}
+                        if (!narr.empty()) {
+                            json t;
+                            t["player_input"] = pending_player;
+                            t["narration"]    = narr;
+                            turns.push_back(t);
+                        }
+                        pending_player.clear();
+                    }
+                }
+            }
+            // Fallback: top-level fields only
+            if (turns.empty()) {
+                std::string narr = j.value("narration", "");
+                if (!narr.empty()) {
+                    json t;
+                    t["player_input"] = j.value("player_input", "");
+                    t["narration"]    = narr;
+                    turns.push_back(t);
+                }
+            }
+        } catch (...) {}
+    }
+    return turns;
+}
+
+// Parse timestamp to UTC seconds since epoch.
+// "YYYY-MM-DDTHH:MM:SSZ" → parsed as UTC via timegm.
+// "YYYYMMDD_HHMMSS"      → parsed as LOCAL time via mktime.
+// Returns -1 on failure.
+static long long ts_to_utc_seconds(const std::string& ts) {
+    if (ts.empty()) return -1;
+    std::tm t = {};
+    bool is_utc = false;
+    try {
+        if (ts.size() >= 19 && ts[4] == '-') {       // ISO8601 "YYYY-MM-DDTHH:MM:SSZ"
+            t.tm_year = std::stoi(ts.substr(0, 4)) - 1900;
+            t.tm_mon  = std::stoi(ts.substr(5, 2)) - 1;
+            t.tm_mday = std::stoi(ts.substr(8, 2));
+            t.tm_hour = std::stoi(ts.substr(11, 2));
+            t.tm_min  = std::stoi(ts.substr(14, 2));
+            t.tm_sec  = std::stoi(ts.substr(17, 2));
+            is_utc = true;
+        } else if (ts.size() >= 15 && ts[8] == '_') { // "YYYYMMDD_HHMMSS" (local)
+            t.tm_year = std::stoi(ts.substr(0, 4)) - 1900;
+            t.tm_mon  = std::stoi(ts.substr(4, 2)) - 1;
+            t.tm_mday = std::stoi(ts.substr(6, 2));
+            t.tm_hour = std::stoi(ts.substr(9, 2));
+            t.tm_min  = std::stoi(ts.substr(11, 2));
+            t.tm_sec  = std::stoi(ts.substr(13, 2));
+        } else { return -1; }
+    } catch (...) { return -1; }
+    t.tm_isdst = -1;
+    std::time_t tt = is_utc ? timegm(&t) : std::mktime(&t);
+    if (tt == (std::time_t)-1) return -1;
+    return static_cast<long long>(tt);
+}
+
+// Returns cached scene images for script_name, optionally bounded by session timestamps.
+// session_start / session_end: ISO8601 UTC; empty = no bound.
+// Tolerance of ±3600 s (1 hour) guards against DST and sub-minute clock drift.
+static json get_cached_scene_images(const std::string& script_name,
+                                     const std::string& session_start = "",
+                                     const std::string& session_end   = "") {
+    json result = json::array();
+    if (cfg.basePath.empty()) return result;
+    std::string db_file = cfg.basePath + "images/scene_cache/cache_db.json";
+    if (!std::filesystem::exists(db_file)) return result;
+    try {
+        std::ifstream f(db_file);
+        json db; f >> db;
+        if (!db.is_array()) return result;
+
+        long long start_sec = session_start.empty() ? -1 : ts_to_utc_seconds(session_start);
+        long long end_sec   = session_end.empty()   ? -1 : ts_to_utc_seconds(session_end);
+        constexpr long long TOL = 3600; // 1 hour — covers DST and clock drift
+
+        for (const auto& entry : db) {
+            if (entry.value("script", "") != script_name) continue;
+            std::string img_path = entry.value("image_path", "");
+            if (img_path.empty() || !std::filesystem::exists(img_path)) continue;
+
+            // Time-range filter (only when bounds are known)
+            if (start_sec >= 0 || end_sec >= 0) {
+                long long img_sec = ts_to_utc_seconds(entry.value("generated_at", ""));
+                if (img_sec < 0) continue; // unparseable — skip
+                if (start_sec >= 0 && img_sec < start_sec - TOL) continue;
+                if (end_sec   >= 0 && img_sec > end_sec   + TOL) continue;
+            }
+
+            json item;
+            item["file"]         = std::filesystem::path(img_path).filename().string();
+            item["generated_at"] = entry.value("generated_at", "");
+            item["assets"]       = entry.value("assets", json::array());
+            item["prompt"]       = entry.value("prompt", "");
+            item["cache_key"]    = entry.value("cache_key", "");
+            result.push_back(item);
+        }
+    } catch (...) {}
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -691,6 +845,9 @@ bool parse_args(int argc, char* argv[]) {
         else if (arg == "--img-i2i-provider") { cfg.imgI2iProvider = next(); }
         else if (arg == "--img-i2i-url")   { cfg.imgI2iUrl    = next(); }
         else if (arg == "--img-i2i-key")   { cfg.imgI2iKey    = next(); }
+        else if (arg == "--img-lora")      { cfg.imgLora       = next(); }
+        else if (arg == "--img-lora-scale"){ cfg.imgLoraScale   = std::stof(next()); }
+        else if (arg == "--faceswap-url")  { cfg.faceswapUrl   = next(); }
         else if (arg == "--web")           { cfg.webMode     = true; }
         else if (arg == "--rag")           { cfg.ragFile     = next(); }
         else if (arg == "--rag-examples")  { cfg.ragExamples = std::stoi(next()); }
@@ -732,6 +889,10 @@ int main(int argc, char* argv[]) {
     std::string active_model = cfg.activeModel();
     std::string save_mode_str = (cfg.saveMode == SaveMode::FULL) ? "full" : "last";
 
+    // Prepend savePath to saveFile so console mode writes to the right directory
+    if (!cfg.savePath.empty())
+        cfg.saveFile = cfg.savePath + cfg.saveFile;
+
     // Load language instruction if --lang was specified
     if (!cfg.langCode.empty()) {
         cfg.langInstruction = load_lang_instruction(cfg.langCode, cfg.langFile);
@@ -765,6 +926,8 @@ int main(int argc, char* argv[]) {
         }
         img_cfg.i2i_url           = cfg.imgI2iUrl;
         img_cfg.i2i_key           = cfg.imgI2iKey;
+        img_cfg.lora_name         = cfg.imgLora;
+        img_cfg.lora_scale        = cfg.imgLoraScale;
         print_system("Image t2i:  provider=" + cfg.imgProvider + " url=" + cfg.imgUrl);
         if (!cfg.imgI2iProvider.empty())
             print_system("Image i2i:  provider=" + cfg.imgI2iProvider
@@ -1208,7 +1371,14 @@ int main(int argc, char* argv[]) {
         // ------------------------------------------------------------------
         // Delegate to Lua
         // ------------------------------------------------------------------
-        sol::table cmd_result = lua["process_player_input"](player_input);
+        sol::protected_function ppi_func = lua["process_player_input"];
+        sol::protected_function_result ppi_res = ppi_func(player_input);
+        if (!ppi_res.valid()) {
+            sol::error ppi_err = ppi_res;
+            print_error("process_player_input error: " + std::string(ppi_err.what()));
+            continue;
+        }
+        sol::table cmd_result = ppi_res;
 
         if (!cmd_result["success"].get<bool>()) {
             print_error(cmd_result["error"].get<std::string>());
@@ -1701,9 +1871,31 @@ sol::table result = f_result;
                 session_state = SessionState::PLAYING;
                 active_script = script_to_load;
 
-                result["success"] = true;
-                result["script"]  = script_to_load;
-                result["display"] = lua["get_display_state"]().get<std::string>();
+                // Extract session bounds from the save file for image filtering.
+                // FULL mode: multiple lines with per-turn timestamps.
+                // LAST mode: single line with session_start + timestamp fields.
+                std::string sess_start, sess_end;
+                {
+                    std::ifstream sf(full_path);
+                    std::string first_line, last_line, ln;
+                    while (std::getline(sf, ln))
+                        if (!ln.empty()) { if (first_line.empty()) first_line = ln; last_line = ln; }
+                    try {
+                        auto fj = json::parse(first_line);
+                        // session_start field (written by new builds); fallback to timestamp
+                        sess_start = fj.value("session_start", fj.value("timestamp", ""));
+                    } catch (...) {}
+                    try {
+                        auto lj = json::parse(last_line);
+                        sess_end = lj.value("timestamp", "");
+                    } catch (...) {}
+                }
+
+                result["success"]       = true;
+                result["script"]        = script_to_load;
+                result["display"]       = lua["get_display_state"]().get<std::string>();
+                result["turns"]         = load_turns_for_replay(full_path);
+                result["cached_images"] = get_cached_scene_images(script_to_load, sess_start, sess_end);
 
             } catch (const std::exception& ex) {
                 result["success"] = false;
@@ -2018,6 +2210,7 @@ sol::table result = f_result;
             std::string image_b64;   // risultato (base64 PNG)
             std::string error;
             std::string asset_id;    // id asset coinvolto (per /generate_asset)
+            std::string prompt;      // visual prompt usato per la generazione
         };
 
         std::mutex                          img_jobs_mutex;
@@ -2028,15 +2221,18 @@ sol::table result = f_result;
             return "imgjob_" + std::to_string(++img_job_counter);
         };
 
-        // Lancia la generazione su un thread separato e aggiorna il job
+        // Lancia la generazione su un thread separato e aggiorna il job.
+        // La lambda restituisce {bytes, prompt}: il prompt viene esposto nel job
+        // per il tooltip nell'UI.
         auto launch_image_job = [&](const std::string& job_id,
-                                    std::function<std::vector<uint8_t>()> fn) {
+                                    std::function<std::pair<std::vector<uint8_t>, std::string>()> fn) {
             std::thread([&img_jobs, &img_jobs_mutex, job_id, fn = std::move(fn)]() {
                 try {
-                    auto bytes = fn();
+                    auto [bytes, prompt] = fn();
                     std::string b64 = bytes_to_base64(bytes);
                     std::lock_guard<std::mutex> lk(img_jobs_mutex);
                     img_jobs[job_id].image_b64 = std::move(b64);
+                    img_jobs[job_id].prompt    = std::move(prompt);
                     img_jobs[job_id].state     = ImageJob::State::DONE;
                 } catch (const std::exception& ex) {
                     std::lock_guard<std::mutex> lk(img_jobs_mutex);
@@ -2068,6 +2264,7 @@ sol::table result = f_result;
                     result["status"] = "done";
                     result["image"]  = job.image_b64;
                     if (!job.asset_id.empty()) result["asset_id"] = job.asset_id;
+                    if (!job.prompt.empty())   result["prompt"]   = job.prompt;
                     break;
                 case ImageJob::State::ERROR:
                     result["status"] = "error";
@@ -2106,12 +2303,36 @@ sol::table result = f_result;
             }
 
             bool partial = false;
+            std::string img_mode;         // "" | "regen" | "refine" | "fix"
+            std::string img_instruction;  // user instruction for "fix" mode
+            float img_strength_override = -1.0f; // <0 = use img_cfg.strength
             try {
                 if (!req.body.empty()) {
-                    auto body = json::parse(req.body);
-                    partial = body.value("partial", false);
+                    auto body    = json::parse(req.body);
+                    partial      = body.value("partial", false);
+                    img_mode     = body.value("mode", "");
+                    img_instruction = body.value("instruction", "");
                 }
             } catch (...) {}
+
+            // Strip --strength / --s <value> from fix instruction
+            if (img_mode == "fix" && !img_instruction.empty()) {
+                std::istringstream iss(img_instruction);
+                std::string tok, rebuilt;
+                std::vector<std::string> toks;
+                while (iss >> tok) toks.push_back(tok);
+                for (size_t i = 0; i < toks.size(); ++i) {
+                    if ((toks[i] == "--strength" || toks[i] == "--s") &&
+                        i + 1 < toks.size()) {
+                        try { img_strength_override = std::stof(toks[i + 1]); } catch (...) {}
+                        ++i; // skip value token
+                    } else {
+                        if (!rebuilt.empty()) rebuilt += ' ';
+                        rebuilt += toks[i];
+                    }
+                }
+                if (img_strength_override > 0.0f) img_instruction = rebuilt;
+            }
 
             // Ask Lua for the asset list of the current scene
             sol::protected_function pf = lua["get_scene_images"];
@@ -2236,14 +2457,68 @@ sol::table result = f_result;
             int collage_h           = img_cfg.height;
             std::string script_copy = cfg.script;
             std::string base_copy   = cfg.basePath;
-            std::string hint_copy   = base_image_hint;
+            std::string hint_copy        = base_image_hint;
+            std::string mode_copy        = img_mode;
+            std::string instruction_copy = img_instruction;
+            std::string sess_start_copy  = cfg.sessionStart;
+            float       strength_copy    = img_strength_override;
 
-            launch_image_job(job_id, [=]() -> std::vector<uint8_t> {
-                // Resolve base_image_hint into a concrete file path (if any)
+            launch_image_job(job_id, [=]() -> std::pair<std::vector<uint8_t>, std::string> {
+                // Resolve i2i base image path / bytes.
+                // Priority: explicit mode (regen/refine/fix/compose) > Lua hint > collage
                 std::string base_image_path;
-                if (hint_copy == "last") {
+                std::vector<uint8_t> base_image_bytes;  // compose mode: bg-only collage
+                bool bypass_cache = false;
+
+                if (mode_copy == "regen") {
+                    // Force fresh collage as i2i source — skip cache entirely
+                    bypass_cache = true;
+                    std::cerr << "[IMG] Mode: regen — bypass cache, fresh collage\n";
+
+                } else if (mode_copy == "refine") {
+                    // Use last cached render as i2i source — bypass cache key check
+                    bypass_cache = true;
                     base_image_path = scene_cache::lookup_last(
-                        base_copy, script_copy, entries_copy);
+                        base_copy, script_copy, entries_copy, sess_start_copy);
+                    if (base_image_path.empty())
+                        std::cerr << "[IMG] Mode: refine — no cached scene found, "
+                                     "falling back to collage\n";
+                    else
+                        std::cerr << "[IMG] Mode: refine — using last cached: "
+                                  << base_image_path << "\n";
+
+                } else if (mode_copy == "fix") {
+                    // User-provided instruction — no LLM prompt, use last cached as base
+                    bypass_cache    = true;
+                    base_image_path = scene_cache::lookup_last(
+                        base_copy, script_copy, entries_copy, sess_start_copy);
+                    if (base_image_path.empty())
+                        throw std::runtime_error(
+                            "No cached scene image found. Run /image first.");
+                    std::cerr << "[IMG] Mode: fix — instruction: "
+                              << instruction_copy.substr(0, 80) << "\n";
+
+                } else if (mode_copy == "compose") {
+                    // Anti-collage mode: use ONLY the background asset (first entry) as
+                    // i2i base. The model draws characters from scratch via the prompt.
+                    bypass_cache = true;
+                    if (!entries_copy.empty()) {
+                        std::vector<CollageEntry> bg_entry = { entries_copy[0] };
+                        base_image_bytes = build_collage(bg_entry, collage_h);
+                        std::cerr << "[IMG] Mode: compose — bg: " << entries_copy[0].path
+                                  << "  bytes=" << base_image_bytes.size() << "\n";
+                    }
+                    if (base_image_bytes.empty())
+                        std::cerr << "[IMG] Mode: compose — WARNING: bg bytes empty, "
+                                     "falling back to full collage\n";
+                    if (strength_copy <= 0.0f)
+                        img_cfg.strength = 0.95f;
+                    std::cerr << "[IMG] Mode: compose — strength=" << img_cfg.strength << "\n";
+
+                } else if (hint_copy == "last") {
+                    // Lua script requested last-render as i2i base
+                    base_image_path = scene_cache::lookup_last(
+                        base_copy, script_copy, entries_copy, sess_start_copy);
                     if (base_image_path.empty())
                         std::cerr << "[IMG] base_image=last: no cached scene found, "
                                      "falling back to collage\n";
@@ -2263,38 +2538,105 @@ sol::table result = f_result;
                 if (collage.empty() && base_image_path.empty())
                     throw std::runtime_error("build_collage returned empty bytes");
 
-                // Generate visual prompt via main LLM
-                std::string tags;
-                for (const auto& e : entries_copy)
-                    tags += "[" + e.tag + "] ";
+                // Generate visual prompt — skip LLM if mode is "fix" (use user instruction)
+                std::string img_prompt;
 
-                std::string prompt_sys =
-                    "You are a visual prompt engineer for an image editing model. "
-                    "Given a reference image and scene context, write a concise image prompt "
-                    "describing how to render the scene. "
-                    "Max 120 words. Visual description only, no JSON, no lists.";
+                if (mode_copy == "fix" && !instruction_copy.empty()) {
+                    img_prompt = instruction_copy;
+                } else {
+                    std::string tags;
+                    for (const auto& e : entries_copy)
+                        tags += "[" + e.tag + "] ";
 
-                std::string prompt_user =
-                    "Scene assets in order: " + tags + miss_copy +
-                    "\n\nCurrent game state:\n" + state_copy +
-                    "\n\nLast narration:\n";
-                try {
-                    auto jn = json::parse(narr_copy);
-                    prompt_user += jn.value("narration", narr_copy);
-                } catch (...) {
-                    prompt_user += narr_copy;
+                    // Collage layout prefix — tells every i2i provider this is ONE
+                    // unified scene, not a grid/collage of separate panels.
+                    // Background = first entry whose tag starts with "bg" or "background",
+                    // or the first entry overall. Everything else = NPC characters.
+                    auto is_bg_tag = [](const std::string& t) {
+                        if (t.size() >= 2 && t.substr(0, 2) == "bg") return true;
+                        if (t.size() >= 10 && t.substr(0, 10) == "background") return true;
+                        return false;
+                    };
+
+                    std::string bg_tag;
+                    int npc_count = 0;
+                    for (const auto& e : entries_copy) {
+                        if (bg_tag.empty() && is_bg_tag(e.tag))
+                            bg_tag = e.tag;
+                        else
+                            ++npc_count;
+                    }
+                    // If no explicit bg tag, treat first entry as background
+                    if (bg_tag.empty() && !entries_copy.empty()) {
+                        bg_tag = entries_copy[0].tag;
+                        npc_count = static_cast<int>(entries_copy.size()) - 1;
+                    }
+
+                    std::string layout_prefix =
+                        "Render as a single unified photorealistic scene (NOT a collage, "
+                        "NOT a grid, NOT side-by-side panels). "
+                        "The background environment fills the entire frame. ";
+                    if (npc_count == 1)
+                        layout_prefix += "One character is naturally placed within the scene. ";
+                    else if (npc_count == 2)
+                        layout_prefix += "Two characters are naturally placed within the scene, "
+                                         "positioned from left to right. ";
+                    else if (npc_count > 2)
+                        layout_prefix += std::to_string(npc_count) +
+                                         " characters are naturally distributed within the scene. ";
+
+                    std::string prompt_sys =
+                        "You are a visual prompt engineer for Stable Diffusion and image editing models. "
+                        "Given a reference image and scene context, write a concise image generation prompt.\n"
+                        "STRICT RULES:\n"
+                        "1. Describe ONLY visual elements: lighting, colors, composition, clothing, "
+                        "setting, atmosphere, body language, facial expressions, spatial relationships.\n"
+                        "2. NEVER use character names, place names, or any proper nouns — "
+                        "replace them with physical descriptors "
+                        "(e.g. 'young woman with dark curly hair and green eyes' instead of a name).\n"
+                        "3. NEVER include dialogue, inner thoughts, or narrative text.\n"
+                        "4. Use comma-separated tags and short descriptive phrases. "
+                        "Photorealistic style. Max 100 words. No JSON, no lists, no quotes.";
+
+                    std::string prompt_user =
+                        "Scene assets in order: " + tags + miss_copy +
+                        "\n\nCurrent game state:\n" + state_copy +
+                        "\n\nLast narration:\n";
+                    try {
+                        auto jn = json::parse(narr_copy);
+                        prompt_user += jn.value("narration", narr_copy);
+                    } catch (...) {
+                        prompt_user += narr_copy;
+                    }
+                    prompt_user += "\n\nWrite the image generation prompt in English. "
+                                   "Remember: no character names, visual descriptors only.";
+
+                    img_prompt = ::query_llm(
+                        ::cfg.provider, prompt_sys, {}, prompt_user, "", ::cfg.activeModel());
+
+                    // Prepend layout prefix + append face-preservation tokens
+                    img_prompt = layout_prefix + img_prompt +
+                        ", preserve facial features of all characters, maintain face identity, "
+                        "keep faces unchanged from reference, consistent character appearance, "
+                        "high fidelity face reproduction, faithful to reference image";
                 }
-                prompt_user += "\n\nWrite the image composition prompt in English.";
-
-                std::string img_prompt = ::query_llm(
-                    ::cfg.provider, prompt_sys, {}, prompt_user, "", ::cfg.activeModel());
 
                 std::cerr << "[IMG] Scene prompt: " << img_prompt.substr(0, 120) << "...\n";
 
-                // image-to-image — uses base_image_path if set, collage otherwise
-                return image_to_image(collage, img_prompt,
-                                      base_copy, script_copy, entries_copy,
-                                      base_image_path);
+                // Apply strength override (--strength / --s flag from fix command)
+                float saved_strength = img_cfg.strength;
+                if (strength_copy > 0.0f) {
+                    img_cfg.strength = strength_copy;
+                    std::cerr << "[IMG] Strength override: " << strength_copy << "\n";
+                }
+
+                // image-to-image — base_image_bytes (compose) > base_image_path > collage
+                auto img_bytes = image_to_image(collage, img_prompt,
+                                                base_copy, script_copy, entries_copy,
+                                                base_image_path, bypass_cache,
+                                                sess_start_copy, base_image_bytes);
+                img_cfg.strength = saved_strength;  // restore
+                return {std::move(img_bytes), img_prompt};
             });
 
             result["success"] = true;
@@ -2401,12 +2743,12 @@ sol::table result = f_result;
             std::string prompt_copy    = prompt;
             std::string full_path_copy = full_path;
 
-            launch_image_job(job_id, [=]() -> std::vector<uint8_t> {
+            launch_image_job(job_id, [=]() -> std::pair<std::vector<uint8_t>, std::string> {
                 auto bytes = text_to_image(prompt_copy, full_path_copy);
                 if (bytes.empty())
                     throw std::runtime_error("text_to_image returned empty result");
                 std::cerr << "[IMG] Asset '" << asset_id << "' saved to: " << full_path_copy << "\n";
-                return bytes;
+                return {std::move(bytes), prompt_copy};
             });
 
             result["success"]  = true;
@@ -2494,15 +2836,310 @@ sol::table result = f_result;
         });
 
         // -----------------------------------------------------------------
+        // GET /api/scene_image?file=<basename>  →  serve cached scene image
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/scene_image")([&](const crow::request& req) {
+            json result;
+            std::string file = req.url_params.get("file") ? req.url_params.get("file") : "";
+            if (file.empty()
+                || file.find('/') != std::string::npos
+                || file.find('\\') != std::string::npos
+                || file.find("..") != std::string::npos) {
+                result["success"] = false;
+                result["error"]   = "Invalid filename.";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+            std::string full_path = cfg.basePath + "images/scene_cache/" + file;
+            if (!std::filesystem::exists(full_path)) {
+                result["success"] = false;
+                result["error"]   = "Not found: " + file;
+                crow::response res(404, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+            std::ifstream f(full_path, std::ios::binary);
+            std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+                                        std::istreambuf_iterator<char>());
+            result["success"] = true;
+            result["image"]   = bytes_to_base64(bytes);
+            auto ext = std::filesystem::path(full_path).extension().string();
+            if      (ext == ".jpg" || ext == ".jpeg") result["mime"] = "image/jpeg";
+            else if (ext == ".webp")                  result["mime"] = "image/webp";
+            else                                      result["mime"] = "image/png";
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // -----------------------------------------------------------------
+        // GET /api/commands  →  engine commands + optional script get_commands()
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/commands")([&]() {
+            std::lock_guard<std::mutex> lock(lua_mutex);
+            json result;
+            if (session_state == SessionState::IDLE) {
+                result["success"] = false;
+                result["error"]   = "No active session.";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+
+            // Always-present engine commands.
+            // label (optional) = display text in sidebar; cmd = what gets filled on click.
+            json cmds = json::array();
+            auto eng = [&](const char* cmd, const char* desc,
+                           bool exec = true, const char* label = nullptr) {
+                json item = {{"cmd", cmd}, {"desc", desc}, {"exec", exec}};
+                if (label) item["label"] = label;
+                cmds.push_back(item);
+            };
+            eng("/image",         "Generate scene image. Modes: regen (bypass cache), refine (reuse last render), fix [--s N] <instruction> (re-edit), compose (anti-collage: use background as base, strength 0.95). Add --partial to allow missing assets.",
+                false, "/image [regen|refine|fix [--s 0.9] <text>|compose [--s N]] [--partial]");
+            eng("/swap",          "Face-swap: replace detected faces left-to-right with NPC asset faces. Use 'null' to skip a slot, '--enhance' to run GFPGAN after swap. Requires --faceswap-url.",
+                false, "/swap [--enhance] <id1> [null] <id2> ...");
+            eng("/show_asset",    "Show a script asset by ID. Usage: /show_asset <id>",
+                false, "/show_asset <id>");
+            eng("/generate_asset","Generate or regenerate a script asset. Usage: /generate_asset <id>",
+                false, "/generate_asset <id>");
+            eng("/observe",       "Ask the AI to describe the current scene in detail");
+            eng("/fix",           "Rewrite the last AI response");
+            eng("/summary",       "Summarise the story so far");
+            eng("/save",          "Save the game manually");
+
+            // Script-specific commands (optional)
+            sol::protected_function pf = lua["get_commands"];
+            if (pf.valid()) {
+                try {
+                    sol::protected_function_result pfr = pf();
+                    if (pfr.valid() && pfr.get_type() == sol::type::table) {
+                        sol::table tbl = pfr.get<sol::table>();
+                        for (auto& kv : tbl) {
+                            if (kv.second.get_type() != sol::type::table) continue;
+                            sol::table c = kv.second.as<sol::table>();
+                            std::string cmd = c.get_or<std::string>("cmd", "");
+                            if (cmd.empty()) continue;
+                            sol::object exec_val = c["exec"];
+                            bool exec = (exec_val.get_type() == sol::type::boolean)
+                                        ? exec_val.as<bool>() : false;
+                            cmds.push_back({
+                                {"cmd",  cmd},
+                                {"desc", c.get_or<std::string>("desc", "")},
+                                {"exec", exec}
+                            });
+                        }
+                    }
+                } catch (...) {}
+            }
+
+            result["success"]  = true;
+            result["commands"] = cmds;
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // -----------------------------------------------------------------
+        // POST /api/swap  →  face-swap via local Python server
+        // Body: { "input": "/swap id1 null id2" }
+        // Returns: { success, job_id } — poll /api/image/job/<id>
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/swap").methods("POST"_method)([&](const crow::request& req) {
+            std::lock_guard<std::mutex> lock(lua_mutex);
+            json result;
+
+            if (cfg.faceswapUrl.empty()) {
+                result["success"] = false;
+                result["error"]   = "Face-swap not enabled. Use --faceswap-url.";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+            if (session_state != SessionState::PLAYING) {
+                result["success"] = false;
+                result["error"]   = "No active session.";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+
+            std::string cmd_input;
+            try {
+                auto body  = json::parse(req.body);
+                cmd_input  = body.value("input", "");
+            } catch (...) {}
+
+            // Tokenise: "/swap [--enhance] id1 null id2 id3"
+            // → tokens = ["id1","null","id2","id3"], enhance = false|true
+            std::vector<std::string> tokens;
+            bool swap_enhance = false;
+            {
+                std::istringstream iss(cmd_input);
+                std::string tok;
+                bool first = true;
+                while (iss >> tok) {
+                    if (first) { first = false; continue; } // skip "/swap"
+                    if (tok == "--enhance") { swap_enhance = true; continue; }
+                    tokens.push_back(tok);
+                }
+            }
+            if (tokens.empty()) {
+                result["success"] = false;
+                result["error"]   = "Usage: /swap [--enhance] <id1> [null] <id2> ...";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+
+            // Resolve asset paths for non-null tokens — needs Lua under mutex
+            // positions[] and asset_paths[] are aligned: null entries are skipped
+            std::vector<int>         positions;
+            std::vector<std::string> asset_paths;
+            sol::protected_function  gap = lua["get_asset_path"];
+            for (int i = 0; i < (int)tokens.size(); ++i) {
+                if (tokens[i] == "null" || tokens[i] == "NULL") continue;
+                std::string path;
+                if (gap.valid()) {
+                    auto r = gap(tokens[i]);
+                    if (r.valid() && r.get_type() == sol::type::string) {
+                        path = r.get<std::string>();
+                        if (!std::filesystem::path(path).is_absolute())
+                            path = cfg.basePath + path;
+                    }
+                }
+                if (path.empty() || !std::filesystem::exists(path)) {
+                    result["success"] = false;
+                    result["error"]   = "Asset not found: " + tokens[i];
+                    crow::response res(404, result.dump());
+                    res.set_header("Content-Type", "application/json"); return res;
+                }
+                positions.push_back(i);
+                asset_paths.push_back(path);
+            }
+            if (positions.empty()) {
+                result["success"] = false;
+                result["error"]   = "No valid asset IDs provided.";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+
+            // Find the last cached scene image
+            sol::protected_function gsf = lua["get_scene_images"];
+            std::vector<CollageEntry> scene_entries;
+            if (gsf.valid()) {
+                auto pfr = gsf();
+                if (pfr.valid() && pfr.get_type() == sol::type::table) {
+                    sol::table tbl = pfr;
+                    sol::object af = tbl["assets"];
+                    sol::table al  = (af.valid() && af.get_type() == sol::type::table)
+                                     ? af.as<sol::table>() : tbl;
+                    for (auto& kv : al) {
+                        sol::table e = kv.second;
+                        std::string id   = e.get_or<std::string>("id",   "");
+                        std::string path = e.get_or<std::string>("path", "");
+                        if (!path.empty()) scene_entries.push_back({path, id});
+                    }
+                }
+            }
+            std::string last_img = scene_cache::lookup_last(
+                cfg.basePath, cfg.script, scene_entries, cfg.sessionStart);
+            if (last_img.empty()) {
+                result["success"] = false;
+                result["error"]   = "No cached scene image found. Run /image first.";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+
+            // Launch async job
+            std::string job_id = new_job_id();
+            {
+                std::lock_guard<std::mutex> lk(img_jobs_mutex);
+                img_jobs[job_id] = ImageJob{};
+            }
+
+            std::string swap_url_copy   = cfg.faceswapUrl;
+            std::string base_copy       = cfg.basePath;
+            std::string script_copy     = cfg.script;
+            std::string swap_sess_copy  = cfg.sessionStart;
+            bool        enhance_copy    = swap_enhance;
+            std::vector<std::string> paths_copy = asset_paths;
+            std::vector<int>         pos_copy   = positions;
+            std::vector<CollageEntry> entries_copy = scene_entries;
+
+            launch_image_job(job_id, [=]() -> std::pair<std::vector<uint8_t>, std::string> {
+                // Read target image
+                std::ifstream tf(last_img, std::ios::binary);
+                std::vector<uint8_t> target_bytes(
+                    (std::istreambuf_iterator<char>(tf)), {});
+                if (target_bytes.empty())
+                    throw std::runtime_error("Cannot read cached scene: " + last_img);
+
+                // Read source images
+                std::vector<std::vector<uint8_t>> sources;
+                for (const auto& p : paths_copy) {
+                    std::ifstream sf(p, std::ios::binary);
+                    sources.push_back(std::vector<uint8_t>(
+                        (std::istreambuf_iterator<char>(sf)), {}));
+                }
+
+                std::string url = swap_url_copy;
+                if (url.size() < 5 || url.substr(url.size() - 5) != "/swap")
+                    url += "/swap";
+
+                std::cerr << "[SWAP] POST " << url
+                          << " positions=" << json(pos_copy).dump() << "\n";
+
+                std::vector<uint8_t> result_bytes =
+                    img_detail::http_post_faceswap_raw(url, target_bytes, sources, pos_copy, enhance_copy);
+
+                if (result_bytes.size() >= 4 &&
+                    !(result_bytes[0] == 0x89 && result_bytes[1] == 'P' &&
+                      result_bytes[2] == 'N'  && result_bytes[3] == 'G')) {
+                    std::string body(result_bytes.begin(),
+                                     result_bytes.begin() + std::min<size_t>(200, result_bytes.size()));
+                    throw std::runtime_error("[SWAP] Response is not PNG: " + body);
+                }
+
+                // Save to scene cache with unique timestamped key
+                if (!base_copy.empty()) {
+                    scene_cache::ensure_dirs(base_copy);
+                    std::time_t mt   = scene_cache::max_mtime(entries_copy);
+                    std::string bkey = scene_cache::make_cache_key(script_copy, entries_copy, mt);
+                    std::string ts   = scene_cache::timestamp_str();
+                    std::string key  = bkey + "_swap_" + ts;
+
+                    std::string result_path = scene_cache::save_result(base_copy, result_bytes, ts + "_swap");
+                    scene_cache::CacheEntry ce;
+                    ce.cache_key     = key;
+                    ce.script        = script_copy;
+                    for (const auto& e : entries_copy) ce.assets.push_back(e.tag);
+                    ce.prompt        = "faceswap";
+                    ce.image_path    = result_path;
+                    ce.collage_path  = "";
+                    ce.generated_at  = ts;
+                    ce.session_start = swap_sess_copy;
+                    scene_cache::upsert(base_copy, ce);
+                }
+
+                return {std::move(result_bytes), "faceswap"};
+            });
+
+            result["success"] = true;
+            result["job_id"]  = job_id;
+            result["warning"] = "";
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // -----------------------------------------------------------------
         // Start server
         // -----------------------------------------------------------------
         int port = 8080;
         print_system("Web mode — http://localhost:" + std::to_string(port));
-        print_system("Routes: GET /  /api/scripts  /api/saves  /api/status  /api/show_asset");
+        print_system("Routes: GET /  /api/scripts  /api/saves  /api/status  /api/show_asset  /api/scene_image  /api/commands");
         print_system("        POST /api/start  /api/init  /api/load  /api/chat  /api/command  /api/save");
-        print_system("        POST /api/image  /api/generate_asset  GET /api/image/job/<id>");
+        print_system("        POST /api/image  /api/generate_asset  /api/swap  GET /api/image/job/<id>");
         if (cfg.imgEnabled)
             print_system("Image:  provider=" + cfg.imgProvider + " url=" + cfg.imgUrl);
+        if (!cfg.faceswapUrl.empty())
+            print_system("FaceSwap: " + cfg.faceswapUrl);
         app.loglevel(crow::LogLevel::Warning);
         app.port(port).multithreaded().run();
     }

@@ -63,6 +63,7 @@ enum class ImageProvider {
     DASHSCOPE,       // Alibaba Cloud DashScope — modelli Qwen-Image nativi
     AIMLAPI,         // AI/ML API — wrapper OpenAI-compatible per Qwen-Image-Edit
     WAVESPEED,       // wavespeed.ai — Qwen-Image-Edit-2511, polling asincrono
+    QWEN_LOCAL,      // local Python server (qwen_locale/server_locale.py)
 };
 
 // These fields are read from cfg in main.cpp — same global variable aliases
@@ -101,6 +102,15 @@ struct ImageConfig {
     float         strength       = 0.75f;
     int           poll_interval_ms = 2000;   // ms tra un poll e l'altro per SDCPP
     int           poll_timeout_s   = 120;    // timeout totale generazione
+
+    // LoRA — used by QWEN_LOCAL provider; ignored by cloud providers
+    std::string   lora_name;      // subfolder name under qwen_locale/loras/
+    float         lora_scale    = 1.0f;
+
+    // Session boundary — UTC ISO8601 timestamp of the first turn in this session.
+    // Cache lookups ignore entries generated before this time (previous runs).
+    // Empty = no filtering (backward-compatible with old saves).
+    std::string   session_start;
 };
 
 static ImageConfig img_cfg;
@@ -252,6 +262,133 @@ static std::string http_post_multipart(const std::string& url,
     return response;
 }
 
+// Multipart POST that returns raw bytes — used by QWEN_LOCAL.
+// Sends: prompt, image file, optional lora_name, lora_scale, steps, strength.
+// Returns raw response body (PNG bytes).
+static std::vector<uint8_t> http_post_multipart_raw(
+        const std::string&        url,
+        const std::string&        prompt,
+        const std::vector<uint8_t>& image_bytes,
+        const std::string&        lora_name,
+        float                     lora_scale,
+        int                       steps,
+        float                     strength) {
+
+    CURL* curl = curl_easy_init();
+    if (!curl) throw std::runtime_error("[IMG] curl_easy_init failed");
+
+    curl_mime* form = curl_mime_init(curl);
+    curl_mimepart* p;
+
+    p = curl_mime_addpart(form);
+    curl_mime_name(p, "prompt");
+    curl_mime_data(p, prompt.c_str(), CURL_ZERO_TERMINATED);
+
+    p = curl_mime_addpart(form);
+    curl_mime_name(p, "images");
+    curl_mime_filename(p, "collage.png");
+    curl_mime_type(p, "image/png");
+    curl_mime_data(p, reinterpret_cast<const char*>(image_bytes.data()), image_bytes.size());
+
+    std::string steps_str    = std::to_string(steps);
+    std::string strength_str = std::to_string(strength);
+
+    p = curl_mime_addpart(form);
+    curl_mime_name(p, "steps");
+    curl_mime_data(p, steps_str.c_str(), CURL_ZERO_TERMINATED);
+
+    p = curl_mime_addpart(form);
+    curl_mime_name(p, "strength");
+    curl_mime_data(p, strength_str.c_str(), CURL_ZERO_TERMINATED);
+
+    if (!lora_name.empty()) {
+        std::string scale_str = std::to_string(lora_scale);
+        p = curl_mime_addpart(form);
+        curl_mime_name(p, "lora_name");
+        curl_mime_data(p, lora_name.c_str(), CURL_ZERO_TERMINATED);
+        p = curl_mime_addpart(form);
+        curl_mime_name(p, "lora_scale");
+        curl_mime_data(p, scale_str.c_str(), CURL_ZERO_TERMINATED);
+    }
+
+    std::vector<uint8_t> result;
+    curl_easy_setopt(curl, CURLOPT_URL,           url.c_str());
+    curl_easy_setopt(curl, CURLOPT_MIMEPOST,      form);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_bytes_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &result);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       180L);
+
+    CURLcode rc = curl_easy_perform(curl);
+    curl_mime_free(form);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK)
+        throw std::runtime_error(std::string("[IMG] qwen_local multipart error: ") + curl_easy_strerror(rc));
+    return result;
+}
+
+// Multipart POST for face-swap: target image + ordered source images + positions array.
+// Returns raw PNG bytes from the response.
+static std::vector<uint8_t> http_post_faceswap_raw(
+        const std::string&                        url,
+        const std::vector<uint8_t>&               target_bytes,
+        const std::vector<std::vector<uint8_t>>&  source_images,
+        const std::vector<int>&                   positions,
+        bool                                      enhance = false) {
+
+    CURL* curl = curl_easy_init();
+    if (!curl) throw std::runtime_error("[IMG] faceswap: curl_easy_init failed");
+
+    curl_mime* form = curl_mime_init(curl);
+    curl_mimepart* p;
+
+    // target
+    p = curl_mime_addpart(form);
+    curl_mime_name(p, "target");
+    curl_mime_filename(p, "target.png");
+    curl_mime_type(p, "image/png");
+    curl_mime_data(p, reinterpret_cast<const char*>(target_bytes.data()), target_bytes.size());
+
+    // sources[] — one part per image
+    for (size_t i = 0; i < source_images.size(); ++i) {
+        p = curl_mime_addpart(form);
+        curl_mime_name(p, "sources");
+        std::string fname = "source_" + std::to_string(i) + ".png";
+        curl_mime_filename(p, fname.c_str());
+        curl_mime_type(p, "image/png");
+        curl_mime_data(p, reinterpret_cast<const char*>(source_images[i].data()),
+                       source_images[i].size());
+    }
+
+    // positions — JSON array string
+    json pos_arr = positions;
+    std::string pos_str = pos_arr.dump();
+    p = curl_mime_addpart(form);
+    curl_mime_name(p, "positions");
+    curl_mime_data(p, pos_str.c_str(), CURL_ZERO_TERMINATED);
+
+    // enhance flag
+    const char* enhance_str = enhance ? "true" : "false";
+    p = curl_mime_addpart(form);
+    curl_mime_name(p, "enhance");
+    curl_mime_data(p, enhance_str, CURL_ZERO_TERMINATED);
+
+    std::vector<uint8_t> result;
+    curl_easy_setopt(curl, CURLOPT_URL,           url.c_str());
+    curl_easy_setopt(curl, CURLOPT_MIMEPOST,      form);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_bytes_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &result);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       120L);
+
+    CURLcode rc = curl_easy_perform(curl);
+    curl_mime_free(form);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK)
+        throw std::runtime_error(std::string("[IMG] faceswap error: ") + curl_easy_strerror(rc));
+    return result;
+}
+
 // Base64 alphabet
 static const char B64_TABLE[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -398,9 +535,9 @@ inline std::string timestamp_str() {
     std::time_t t = std::chrono::system_clock::to_time_t(now);
     std::tm tm_buf{};
 #ifdef _WIN32
-    localtime_s(&tm_buf, &t);
+    gmtime_s(&tm_buf, &t);
 #else
-    localtime_r(&t, &tm_buf);
+    gmtime_r(&t, &tm_buf);
 #endif
     std::ostringstream ss;
     ss << std::put_time(&tm_buf, "%Y%m%d_%H%M%S");
@@ -410,6 +547,36 @@ inline std::string timestamp_str() {
 // ---------------------------------------------------------------------------
 // Describes a single cache entry
 // ---------------------------------------------------------------------------
+// "YYYY-MM-DDTHH:MM:SSZ" → timegm (UTC); "YYYYMMDD_HHMMSS" → mktime (local→UTC).
+// Returns -1 on failure.
+inline long long ts_to_utc_seconds(const std::string& ts) {
+    if (ts.empty()) return -1;
+    std::tm t = {};
+    bool is_utc = false;
+    try {
+        if (ts.size() >= 19 && ts[4] == '-') {
+            t.tm_year = std::stoi(ts.substr(0, 4)) - 1900;
+            t.tm_mon  = std::stoi(ts.substr(5, 2)) - 1;
+            t.tm_mday = std::stoi(ts.substr(8, 2));
+            t.tm_hour = std::stoi(ts.substr(11, 2));
+            t.tm_min  = std::stoi(ts.substr(14, 2));
+            t.tm_sec  = std::stoi(ts.substr(17, 2));
+            is_utc = true;
+        } else if (ts.size() >= 15 && ts[8] == '_') {
+            t.tm_year = std::stoi(ts.substr(0, 4)) - 1900;
+            t.tm_mon  = std::stoi(ts.substr(4, 2)) - 1;
+            t.tm_mday = std::stoi(ts.substr(6, 2));
+            t.tm_hour = std::stoi(ts.substr(9, 2));
+            t.tm_min  = std::stoi(ts.substr(11, 2));
+            t.tm_sec  = std::stoi(ts.substr(13, 2));
+            is_utc = true;  // timestamp_str() now emits UTC
+        } else { return -1; }
+    } catch (...) { return -1; }
+    t.tm_isdst = -1;
+    std::time_t tt = is_utc ? timegm(&t) : std::mktime(&t);
+    return (tt == (std::time_t)-1) ? -1 : static_cast<long long>(tt);
+}
+
 struct CacheEntry {
     std::string cache_key;
     std::string script;
@@ -418,6 +585,7 @@ struct CacheEntry {
     std::string image_path;           // risultato finale
     std::string collage_path;         // collage temporaneo
     std::string generated_at;
+    std::string session_start;        // UTC ISO8601 — session that generated this entry
 };
 
 // ---------------------------------------------------------------------------
@@ -472,14 +640,21 @@ inline void save_db(const std::string& base_path, const json& db) {
 // Altrimenti restituisce stringa vuota.
 // ---------------------------------------------------------------------------
 inline std::string lookup(const std::string& base_path,
-                           const std::string& cache_key) {
+                           const std::string& cache_key,
+                           const std::string& session_start = "") {
     json db = load_db(base_path);
+    long long start_sec = ts_to_utc_seconds(session_start);
+    constexpr long long TOL = 3600;
     for (const auto& entry : db) {
-        if (entry.value("cache_key", "") == cache_key) {
-            std::string img = entry.value("image_path", "");
-            if (!img.empty() && std::filesystem::exists(img))
-                return img;
+        if (entry.value("cache_key", "") != cache_key) continue;
+        // Session filter: ignore cache hits from a different (older) session
+        if (start_sec >= 0) {
+            long long img_sec = ts_to_utc_seconds(entry.value("generated_at", ""));
+            if (img_sec >= 0 && img_sec < start_sec - TOL) continue;
         }
+        std::string img = entry.value("image_path", "");
+        if (!img.empty() && std::filesystem::exists(img))
+            return img;
     }
     return "";
 }
@@ -494,9 +669,13 @@ inline std::string lookup(const std::string& base_path,
 // ---------------------------------------------------------------------------
 inline std::string lookup_last(const std::string& base_path,
                                 const std::string& script,
-                                const std::vector<CollageEntry>& entries) {
+                                const std::vector<CollageEntry>& entries,
+                                const std::string& session_start = "") {
     json db = load_db(base_path);
     if (db.empty()) return "";
+
+    long long start_sec = ts_to_utc_seconds(session_start);
+    constexpr long long TOL = 3600;
 
     // Build sorted asset id set for comparison
     std::vector<std::string> want_ids;
@@ -507,6 +686,12 @@ inline std::string lookup_last(const std::string& base_path,
     for (int i = (int)db.size() - 1; i >= 0; --i) {
         const auto& entry = db[i];
         if (entry.value("script", "") != script) continue;
+
+        // Session filter: skip entries from a previous session
+        if (start_sec >= 0) {
+            long long img_sec = ts_to_utc_seconds(entry.value("generated_at", ""));
+            if (img_sec >= 0 && img_sec < start_sec - TOL) continue;
+        }
 
         std::vector<std::string> have_ids;
         if (entry.contains("assets") && entry["assets"].is_array())
@@ -540,10 +725,11 @@ inline void upsert(const std::string& base_path, const CacheEntry& ce) {
     item["cache_key"]    = ce.cache_key;
     item["script"]       = ce.script;
     item["assets"]       = ce.assets;
-    item["prompt"]       = ce.prompt;
-    item["image_path"]   = ce.image_path;
-    item["collage_path"] = ce.collage_path;
-    item["generated_at"] = ce.generated_at;
+    item["prompt"]        = ce.prompt;
+    item["image_path"]    = ce.image_path;
+    item["collage_path"]  = ce.collage_path;
+    item["generated_at"]  = ce.generated_at;
+    item["session_start"] = ce.session_start;
     new_db.push_back(item);
 
     save_db(base_path, new_db);
@@ -1316,7 +1502,8 @@ static std::vector<uint8_t> poll_result(const std::string& prediction_id) {
 }
 
 inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
-                                     const std::string& prompt) {
+                                     const std::string& prompt,
+                                     const std::vector<std::vector<uint8_t>>& extra_refs = {}) {
     std::string model = img_cfg.i2i_model.empty()
         ? "wavespeed-ai/qwen-image/edit-2511"
         : img_cfg.i2i_model;
@@ -1326,11 +1513,14 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
 
     std::string url = WS_BASE + "/api/v3/" + model;
 
-    std::string b64 = bytes_to_base64(collage_bytes);
+    json imgs = json::array({bytes_to_base64(collage_bytes)});
+    for (const auto& ref : extra_refs)
+        imgs.push_back(bytes_to_base64(ref));
+    std::cerr << "[IMG] WaveSpeed images count: " << imgs.size() << "\n";
 
     json req;
     req["prompt"]               = prompt;
-    req["images"]               = json::array({b64});   // WaveSpeed expects an array
+    req["images"]               = imgs;
     req["seed"]                 = -1;
     req["output_format"]        = "jpeg";
     req["enable_base64_output"] = true;
@@ -1360,6 +1550,54 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
 }
 
 } // namespace wavespeed
+
+// =============================================================================
+// qwen_local — local Python server (qwen_locale/server_locale.py)
+//   POST /edit  multipart: prompt, images (file), lora_name?, lora_scale?
+//   Response: raw PNG bytes (no JSON wrapper)
+// =============================================================================
+
+namespace qwen_local {
+
+inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
+                                     const std::string& prompt) {
+    std::string url = img_cfg.i2i_url.empty()
+        ? (img_cfg.url.empty() ? "http://127.0.0.1:8000" : img_cfg.url)
+        : img_cfg.i2i_url;
+
+    // Ensure the endpoint path is present
+    if (url.size() < 5 || url.substr(url.size() - 5) != "/edit")
+        url += "/edit";
+
+    std::cerr << "[IMG] qwen_local POST " << url
+              << "  strength=" << img_cfg.strength
+              << "  steps=" << img_cfg.steps << "\n";
+
+    std::vector<uint8_t> result = img_detail::http_post_multipart_raw(
+        url,
+        prompt,
+        collage_bytes,
+        img_cfg.lora_name,
+        img_cfg.lora_scale,
+        img_cfg.steps,
+        img_cfg.strength
+    );
+
+    if (result.empty())
+        throw std::runtime_error("[IMG] qwen_local: empty response from server.");
+
+    // Sanity check — PNG magic bytes
+    if (result.size() >= 4
+        && !(result[0] == 0x89 && result[1] == 'P' && result[2] == 'N' && result[3] == 'G')) {
+        // Might be an HTTP error body — log first 200 chars
+        std::string body(result.begin(), result.begin() + std::min<size_t>(result.size(), 200));
+        throw std::runtime_error("[IMG] qwen_local: response is not a PNG. Body: " + body);
+    }
+
+    return result;
+}
+
+} // namespace qwen_local
 
 // =============================================================================
 // Public API — text_to_image and image_to_image
@@ -1401,15 +1639,19 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
                                             const std::string& base_path        = "",
                                             const std::string& script_name      = "",
                                             const std::vector<CollageEntry>& entries = {},
-                                            const std::string& base_image_path  = "") {
+                                            const std::string& base_image_path  = "",
+                                            bool bypass_cache                   = false,
+                                            const std::string& session_start    = "",
+                                            const std::vector<uint8_t>& base_image_bytes = {}) {
     // --- Cache lookup ---
+    // Skipped when bypass_cache=true (regen / refine modes from /image command).
     std::string cache_key;
-    if (!base_path.empty() && !script_name.empty() && !entries.empty()) {
+    if (!bypass_cache && !base_path.empty() && !script_name.empty() && !entries.empty()) {
         scene_cache::ensure_dirs(base_path);
         std::time_t mtime = scene_cache::max_mtime(entries);
         cache_key = scene_cache::make_cache_key(script_name, entries, mtime);
 
-        std::string cached = scene_cache::lookup(base_path, cache_key);
+        std::string cached = scene_cache::lookup(base_path, cache_key, session_start);
         if (!cached.empty()) {
             std::cerr << "[IMG] Cache hit: " << cached << "\n";
             std::ifstream f(cached, std::ios::binary);
@@ -1417,13 +1659,28 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
                 std::istreambuf_iterator<char>(f), {});
         }
         std::cerr << "[IMG] Cache miss, generating...\n";
+    } else if (bypass_cache) {
+        // Compute a unique cache_key (base_key + timestamp) so upsert APPENDS
+        // instead of overwriting the existing entry. Previous images are preserved;
+        // lookup_last() still finds the most recent by scanning in reverse.
+        if (!base_path.empty() && !script_name.empty() && !entries.empty()) {
+            scene_cache::ensure_dirs(base_path);
+            std::time_t mtime = scene_cache::max_mtime(entries);
+            std::string base_key = scene_cache::make_cache_key(script_name, entries, mtime);
+            cache_key = base_key + "_" + scene_cache::timestamp_str();
+        }
+        std::cerr << "[IMG] Cache bypassed — generating fresh image (previous preserved)\n";
     }
 
     // --- Generation ---
-    // If base_image_path points to an existing file, load it and use it as the
-    // i2i source instead of the collage. collage_bytes remain the fallback.
+    // Priority: base_image_bytes (raw bytes, e.g. compose mode) >
+    //           base_image_path (file path) > collage_bytes (default).
     std::vector<uint8_t> i2i_source = collage_bytes;
-    if (!base_image_path.empty() && std::filesystem::exists(base_image_path)) {
+    if (!base_image_bytes.empty()) {
+        i2i_source = base_image_bytes;
+        std::cerr << "[IMG] Using provided base image bytes as i2i source ("
+                  << base_image_bytes.size() << " bytes)\n";
+    } else if (!base_image_path.empty() && std::filesystem::exists(base_image_path)) {
         std::ifstream bf(base_image_path, std::ios::binary);
         std::vector<uint8_t> loaded(
             std::istreambuf_iterator<char>(bf), {});
@@ -1445,7 +1702,40 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
         case ImageProvider::FAL_AI:          result = fal_ai::img2img(i2i_source, prompt);          break;
         case ImageProvider::DASHSCOPE:       result = dashscope::img2img(i2i_source, prompt);       break;
         case ImageProvider::AIMLAPI:         result = aimlapi::img2img(i2i_source, prompt);         break;
-        case ImageProvider::WAVESPEED:       result = wavespeed::img2img(i2i_source, prompt);       break;
+        case ImageProvider::WAVESPEED: {
+            // WaveSpeed/Qwen supports multiple images natively — send bg and NPCs
+            // as separate inputs instead of a merged collage.
+            //
+            // If the caller set an explicit base (refine/fix → last render,
+            // compose → bg-only bytes), honour it. Otherwise load bg from
+            // entries[0] so we never send the side-by-side collage.
+            bool has_explicit_base = !base_image_bytes.empty() || !base_image_path.empty();
+            std::vector<uint8_t> ws_base = i2i_source;  // already resolved above
+
+            if (!has_explicit_base && !entries.empty()) {
+                // Normal / regen: load bg directly from asset file
+                std::ifstream bf(entries[0].path, std::ios::binary);
+                std::vector<uint8_t> bg_b(std::istreambuf_iterator<char>(bf), {});
+                if (!bg_b.empty()) {
+                    ws_base = std::move(bg_b);
+                    std::cerr << "[IMG] WaveSpeed base: " << entries[0].tag << "\n";
+                }
+            }
+
+            // NPC portraits as extra reference images (entries[1..])
+            std::vector<std::vector<uint8_t>> npc_refs;
+            for (size_t i = 1; i < entries.size(); ++i) {
+                std::ifstream rf(entries[i].path, std::ios::binary);
+                std::vector<uint8_t> rb(std::istreambuf_iterator<char>(rf), {});
+                if (!rb.empty()) {
+                    npc_refs.push_back(std::move(rb));
+                    std::cerr << "[IMG] WaveSpeed NPC ref: " << entries[i].tag << "\n";
+                }
+            }
+            result = wavespeed::img2img(ws_base, prompt, npc_refs);
+            break;
+        }
+        case ImageProvider::QWEN_LOCAL:      result = qwen_local::img2img(i2i_source, prompt);      break;
         default:                             result = sdcpp::img2img(i2i_source, prompt);            break;
     }
 
@@ -1456,12 +1746,13 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
         std::string result_path = scene_cache::save_result(base_path, result, ts);
 
         scene_cache::CacheEntry ce;
-        ce.cache_key    = cache_key;
-        ce.script       = script_name;
-        ce.prompt       = prompt;
-        ce.image_path   = result_path;
-        ce.collage_path = coll_path;
-        ce.generated_at = ts;
+        ce.cache_key     = cache_key;
+        ce.script        = script_name;
+        ce.prompt        = prompt;
+        ce.image_path    = result_path;
+        ce.collage_path  = coll_path;
+        ce.generated_at  = ts;
+        ce.session_start = session_start;
         for (const auto& e : entries) ce.assets.push_back(e.tag);
         scene_cache::upsert(base_path, ce);
 
@@ -1487,6 +1778,7 @@ inline ImageProvider img_provider_from_string(const std::string& s) {
     if (s == "dashscope")  return ImageProvider::DASHSCOPE;
     if (s == "aimlapi")    return ImageProvider::AIMLAPI;
     if (s == "wavespeed")  return ImageProvider::WAVESPEED;
+    if (s == "qwen_local") return ImageProvider::QWEN_LOCAL;
     return ImageProvider::SDCPP_LOCAL;
 }
 
@@ -1500,7 +1792,7 @@ inline void print_image_help() {
         std::cout << line << "\n";
     };
     std::cout << "\nIMAGE GENERATION\n";
-    opt("--img-provider <n>",    "sdcpp_local|openai|openrouter|fal|dashscope|aimlapi", "sdcpp_local");
+    opt("--img-provider <n>",    "sdcpp_local|openai|openrouter|fal|dashscope|aimlapi|wavespeed|qwen_local", "sdcpp_local");
     opt("--img-i2i-provider <n>",  "dedicated i2i provider (if different from --img-provider)", "");
     opt("--img-url <url>",       "local image server URL",         img_cfg.url);
     opt("--img-key <key>",       "API key (default: LLM provider key)", "");
@@ -1512,6 +1804,8 @@ inline void print_image_help() {
     opt("--img-strength <f>",    "denoising strength (i2i)",       "0.75");
     opt("--img-i2i-url <url>",  "i2i server URL (if different from --img-url)",  "");
     opt("--img-i2i-key <key>",  "i2i API key (if different from --img-key)",     "");
+    opt("--img-lora <name>",    "LoRA subfolder under qwen_locale/loras/ (qwen_local only)", "");
+    opt("--img-lora-scale <f>", "LoRA weight scale for qwen_local",              "1.0");
 }
 
 // =============================================================================

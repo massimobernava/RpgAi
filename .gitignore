@@ -18,3 +18,20 @@ scripts/images/scene_cache/
 # Launch scripts containing API keys.
 # Commit a *.sh.template with placeholders instead.
 openrouter_web.sh
+console_test.sh
+
+# Private game scripts (not published — only fantasy_demo.lua is public)
+npc_mod/
+scripts/estate_italiana_*.lua
+scripts/snow_daze_*.lua
+scripts/sogno_lucido_*.lua
+scripts/lib/estate_data.lua
+scripts/lib/estate_dataX.lua
+
+# Private script asset images
+scripts/images/estate_italiana/
+scripts/images/snow_daze/
+scripts/images/collage_tmp/
+
+# Internal playtesting log (contains private script details)
+PLAYTESTING_INTERNAL.md

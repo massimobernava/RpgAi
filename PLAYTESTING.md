@@ -1,9 +1,9 @@
 # RpgAi Playtesting Log
 
-This document records automated playtesting sessions run by Claude Code against
-the demo script. Each session is followed by a list of findings and the fixes
-applied. The goal is to catch bugs and design gaps that are invisible from code
-review alone.
+This document records automated playtesting sessions run against the public demo
+script (`fantasy_demo.lua`). Each session is followed by a list of findings and
+the fixes applied. The goal is to catch bugs and design gaps that are invisible
+from code review alone.
 
 ---
 
@@ -57,6 +57,31 @@ Damage applied correctly. HUD updates live. Combat now has mechanical weight.
 
 ---
 
+## Session 2 — engine bugs found during internal testing (2026-04-22)
+
+**Context:** internal script test (script not published).
+
+### Findings
+
+| # | Severity | Description |
+|---|---|---|
+| 1 | **High** | Dream schema constant undefined — `generate_dreams()` failed silently, `/sogni` always returned "no dreams yet" even after a day change. |
+| 2 | **Medium** | `--save-path` ignored in console mode. `cfg.savePath` was never prepended to `cfg.saveFile`; file was written to CWD instead of the specified directory. |
+
+### Fixes applied
+
+**1. Dynamic dream schema** (`scripts/<script>.lua` pattern)
+- Build the JSON schema for dream generation dynamically at call time, enumerating
+  only the NPCs with `confidenza > 0` as explicit required properties.
+- Never rely on a module-level schema constant for LLM calls that depend on
+  runtime state.
+
+**2. Console save path** (`src/main.cpp`)
+- After arg parsing: `if (!cfg.savePath.empty()) cfg.saveFile = cfg.savePath + cfg.saveFile;`
+- `--save-path saves/` now correctly writes `saves/session_log.jsonl`.
+
+---
+
 ## How to run a playtesting session
 
 1. Build the release binary: `./build.sh`
@@ -90,4 +115,5 @@ Damage applied correctly. HUD updates live. Combat now has mechanical weight.
   but aren't enforced by `process_ai_response`.
 - **Narrative inconsistencies** — LLM placing the player in a location they
   didn't move to, referencing defeated NPCs as still present, etc.
-- **Italian/untranslated strings** — any visible text that isn't English.
+- **Untranslated strings** — any visible text in a language other than the
+  script's target language.
