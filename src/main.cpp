@@ -245,7 +245,7 @@ struct Config {
     }
 };
 
-struct Message { std::string role; std::string content; std::string player_id; };
+struct Message { std::string role; std::string content; std::string player_id; std::string timestamp; };
 
 static Config cfg;
 
@@ -476,8 +476,16 @@ static json build_turn_json(const std::string& player_input,
     j["narration"]    = narration;
     j["state_after"]  = state_after;
     json j_hist = json::array();
-    for (const auto& m : history)
-        j_hist.push_back({{"role", m.role}, {"content", m.content}, {"player_id", m.player_id}});
+    for (size_t i = 0; i < history.size(); i++) {
+        const auto& m = history[i];
+        json entry = {{"role", m.role}, {"content", m.content}, {"player_id", m.player_id}};
+        // Stamp the current turn's assistant/gm message with ts; preserve stored timestamps for earlier messages.
+        if (i == history.size() - 1 && m.role == "assistant" && m.player_id == "gm")
+            entry["timestamp"] = ts;
+        else if (!m.timestamp.empty())
+            entry["timestamp"] = m.timestamp;
+        j_hist.push_back(entry);
+    }
     j["chat_history"] = j_hist;
     return j;
 }
@@ -528,7 +536,7 @@ bool load_session_from_jsonl(const std::string& filename,
         if (!res["success"]) { std::cerr << "[ERROR] Lua restore failed.\n"; return false; }
         history.clear();
         for (const auto& item : j["chat_history"])
-            history.push_back({item["role"], item["content"], item["player_id"]});
+            history.push_back({item.value("role",""), item.value("content",""), item.value("player_id",""), item.value("timestamp","")});
         std::cout << "[SYSTEM] Session loaded from " << filename << "\n";
         return true;
     } catch (const std::exception& e) {
@@ -587,9 +595,31 @@ static json load_turns_for_replay(const std::string& filename) {
                             json t;
                             t["player_input"] = pending_player;
                             t["narration"]    = narr;
+                            t["timestamp"]    = msg.value("timestamp", "");
                             turns.push_back(t);
                         }
                         pending_player.clear();
+                    }
+                }
+            }
+            // Fallback for old saves without per-message timestamps:
+            // interpolate linearly between session_start and the last turn's timestamp.
+            {
+                std::string t0_str = j.value("session_start", j.value("timestamp", ""));
+                std::string t1_str = j.value("timestamp", "");
+                bool needs_interp = !turns.empty() && turns[0].value("timestamp","").empty();
+                if (needs_interp && !t0_str.empty() && !t1_str.empty()) {
+                    long long t0 = scene_cache::ts_to_utc_seconds(t0_str);
+                    long long t1 = scene_cache::ts_to_utc_seconds(t1_str);
+                    size_t n = turns.size();
+                    for (size_t i = 0; i < n; i++) {
+                        long long interp = (n == 1) ? t1 : t0 + (t1 - t0) * (long long)i / (long long)(n - 1);
+                        std::tm tm_u{};
+                        std::time_t tt = (std::time_t)interp;
+                        gmtime_r(&tt, &tm_u);
+                        char buf[32];
+                        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_u);
+                        turns[i]["timestamp"] = buf;
                     }
                 }
             }
@@ -664,17 +694,29 @@ static json get_cached_scene_images(const std::string& script_name,
             std::string img_path = entry.value("image_path", "");
             if (img_path.empty() || !std::filesystem::exists(img_path)) continue;
 
+            // Prefer utc_at (new entries) over generated_at (old entries, local tz)
+            std::string utc_at_str  = entry.value("utc_at", "");
+            std::string gen_at_str  = entry.value("generated_at", "");
+            long long   img_sec     = utc_at_str.empty()
+                                        ? ts_to_utc_seconds(gen_at_str)    // local→UTC
+                                        : ts_to_utc_seconds(utc_at_str);   // already UTC ISO
+
             // Time-range filter (only when bounds are known)
             if (start_sec >= 0 || end_sec >= 0) {
-                long long img_sec = ts_to_utc_seconds(entry.value("generated_at", ""));
                 if (img_sec < 0) continue; // unparseable — skip
                 if (start_sec >= 0 && img_sec < start_sec - TOL) continue;
                 if (end_sec   >= 0 && img_sec > end_sec   + TOL) continue;
             }
 
+            // utc_at sent to JS: use explicit field if present, else derive from epoch
+            std::string utc_at_out = utc_at_str.empty()
+                                       ? scene_cache::epoch_to_utc_iso(img_sec)
+                                       : utc_at_str;
+
             json item;
             item["file"]         = std::filesystem::path(img_path).filename().string();
-            item["generated_at"] = entry.value("generated_at", "");
+            item["generated_at"] = gen_at_str;
+            item["utc_at"]       = utc_at_out;
             item["assets"]       = entry.value("assets", json::array());
             item["prompt"]       = entry.value("prompt", "");
             item["cache_key"]    = entry.value("cache_key", "");
@@ -1104,7 +1146,7 @@ int main(int argc, char* argv[]) {
     }
 
     // sys_prompt and schema are re-read dynamically each turn in web mode
-    // (scripts like estate_italiana recompute them on every call)
+    // (some scripts recompute them on every call based on current state)
     // In console mode we read them once for consistency with original behaviour
     std::string lua_sys_prompt_console;
     std::string json_schema_console;
@@ -1714,7 +1756,7 @@ sol::table result = f_result;
 
         // -----------------------------------------------------------------
         // POST /api/start  →  load script, show welcome, wait for /api/init
-        // Body: { "script": "estate_italiana_v4X.lua" }
+        // Body: { "script": "my_adventure.lua" }
         // -----------------------------------------------------------------
         CROW_ROUTE(app, "/api/start").methods("POST"_method)([&](const crow::request& req) {
             std::lock_guard<std::mutex> lock(lua_mutex);
@@ -3113,6 +3155,7 @@ sol::table result = f_result;
                     ce.image_path    = result_path;
                     ce.collage_path  = "";
                     ce.generated_at  = ts;
+                    ce.utc_at        = scene_cache::utc_iso_now();
                     ce.session_start = swap_sess_copy;
                     scene_cache::upsert(base_copy, ce);
                 }

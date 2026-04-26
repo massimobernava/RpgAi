@@ -548,6 +548,7 @@ inline std::string timestamp_str() {
 // Describes a single cache entry
 // ---------------------------------------------------------------------------
 // "YYYY-MM-DDTHH:MM:SSZ" → timegm (UTC); "YYYYMMDD_HHMMSS" → mktime (local→UTC).
+// Old cache files store local time in the filename; new ones store utc_at separately.
 // Returns -1 on failure.
 inline long long ts_to_utc_seconds(const std::string& ts) {
     if (ts.empty()) return -1;
@@ -569,12 +570,34 @@ inline long long ts_to_utc_seconds(const std::string& ts) {
             t.tm_hour = std::stoi(ts.substr(9, 2));
             t.tm_min  = std::stoi(ts.substr(11, 2));
             t.tm_sec  = std::stoi(ts.substr(13, 2));
-            is_utc = true;  // timestamp_str() now emits UTC
+            // local time — use mktime (old filenames were generated in local tz)
         } else { return -1; }
     } catch (...) { return -1; }
     t.tm_isdst = -1;
     std::time_t tt = is_utc ? timegm(&t) : std::mktime(&t);
     return (tt == (std::time_t)-1) ? -1 : static_cast<long long>(tt);
+}
+
+// epoch seconds → "YYYY-MM-DDTHH:MM:SSZ"
+inline std::string epoch_to_utc_iso(long long sec) {
+    if (sec < 0) return "";
+    std::time_t t = static_cast<std::time_t>(sec);
+    std::tm tm_buf{};
+#ifdef _WIN32
+    gmtime_s(&tm_buf, &t);
+#else
+    gmtime_r(&t, &tm_buf);
+#endif
+    std::ostringstream ss;
+    ss << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%SZ");
+    return ss.str();
+}
+
+// Current UTC time as ISO8601 string "YYYY-MM-DDTHH:MM:SSZ"
+inline std::string utc_iso_now() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    return epoch_to_utc_iso(static_cast<long long>(t));
 }
 
 struct CacheEntry {
@@ -585,6 +608,7 @@ struct CacheEntry {
     std::string image_path;           // risultato finale
     std::string collage_path;         // collage temporaneo
     std::string generated_at;
+    std::string utc_at;               // UTC ISO8601 — precise replay timestamp (new entries only)
     std::string session_start;        // UTC ISO8601 — session that generated this entry
 };
 
@@ -729,6 +753,7 @@ inline void upsert(const std::string& base_path, const CacheEntry& ce) {
     item["image_path"]    = ce.image_path;
     item["collage_path"]  = ce.collage_path;
     item["generated_at"]  = ce.generated_at;
+    item["utc_at"]        = ce.utc_at;
     item["session_start"] = ce.session_start;
     new_db.push_back(item);
 
@@ -1752,6 +1777,7 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
         ce.image_path    = result_path;
         ce.collage_path  = coll_path;
         ce.generated_at  = ts;
+        ce.utc_at        = scene_cache::utc_iso_now();
         ce.session_start = session_start;
         for (const auto& e : entries) ce.assets.push_back(e.tag);
         scene_cache::upsert(base_path, ce);

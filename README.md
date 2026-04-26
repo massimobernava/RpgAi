@@ -135,6 +135,53 @@ narration + updated HUD → player
 
 **Fail gracefully.** Every LLM call retries up to `--max-retries`. Image generation is async and non-blocking. Missing assets are generated on demand.
 
+### Lua agents — secondary LLM calls from script
+
+Because `query_llm` is exposed directly to Lua, your script can make **additional, independent LLM calls** at any point — not just inside the main GM turn. These secondary calls are called *agents* and follow a simple pattern: read `state`, call `query_llm` with a focused prompt and a tight JSON schema, then apply the result directly to `state`.
+
+Agents run in the same Lua state as the rest of the script, so they have full access to all game data and can modify it freely. The engine imposes no structure — each agent decides for itself when to activate, what to ask, and what to change.
+
+```lua
+-- Example: a world-events agent that fires once per in-game day
+local function world_events_agent(minuti_avanzati)
+    if state.giorno == state._last_event_day then return end   -- already ran today
+    state._last_event_day = state.giorno
+
+    local schema = '{"type":"object","required":["evento","desc"],' ..
+                   '"properties":{"evento":{"type":"string"},"desc":{"type":"string"}}}'
+    local ok, reply = pcall(query_llm,
+        "You are a world event generator for a summer Italian city RPG.",
+        "[]",
+        "Generate a small background event for today: a market, a street musician, "
+     .. "a shop closure, a local festival. Keep it grounded and brief.",
+        schema)
+    if not ok then return end
+
+    local ok2, data = pcall(json.decode, reply)
+    if ok2 and data.evento ~= "" then
+        state.evento_giorno = data
+        push_log("📰 " .. data.evento)
+    end
+end
+
+-- Called wherever makes sense — inside process_ai_response, a slash command, etc.
+-- No central dispatcher required.
+```
+
+Common agent patterns:
+
+| Agent | When to fire | LLM needed? |
+|---|---|---|
+| NPC needs (hunger, sleep, …) | every turn, deterministic | no |
+| Relationship natural drift | day rollover | no |
+| World events | day rollover | yes (small schema) |
+| NPC gossip propagation | after a public action | yes |
+| Dream generation | night / day rollover | yes |
+| Rival NPC with own goals | every few turns | yes |
+| Economy / shop prices | weekly | no |
+
+**Performance note:** each `query_llm` call inside an agent is synchronous and blocks the Lua mutex in web mode. Keep LLM agents rare (day-boundary events, significant triggers) and prefer deterministic logic for per-turn updates.
+
 ---
 
 ## 📚 Documentation

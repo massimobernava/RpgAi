@@ -534,8 +534,8 @@ btnLoad.addEventListener('click', async () => {
     loadCommands();
 
     // Correlate images with turns by timestamp, then replay chat with images inline.
-    // Turn timestamps: "YYYY-MM-DDTHH:MM:SSZ" (UTC)
-    // Image generated_at: "YYYYMMDD_HHMMSS" (local) — strip non-digits for comparison.
+    // Turn timestamps: "YYYY-MM-DDTHH:MM:SSZ" (UTC ISO)
+    // img.utc_at: "YYYY-MM-DDTHH:MM:SSZ" (UTC ISO, always — server normalises old entries)
     function normTs(s) { return s ? s.replace(/\D/g, '') : ''; }
 
     const turns      = data.turns        || [];
@@ -546,7 +546,9 @@ btnLoad.addEventListener('click', async () => {
     // image goes after turn[i] if turn[i].timestamp <= img.ts < turn[i+1].timestamp
     // image goes after last turn if img.ts >= last turn timestamp
     // image goes before all turns (idx = -1) if img.ts < first turn timestamp
-    function assignImageToTurn(imgTs) {
+    function assignImageToTurn(img) {
+      // utc_at is always UTC ISO (server converts old local-tz entries on the fly)
+      const imgTs = img.utc_at || img.generated_at;
       if (turns.length === 0) return -1;
       const nImg = normTs(imgTs);
       for (let i = turns.length - 1; i >= 0; i--) {
@@ -558,7 +560,7 @@ btnLoad.addEventListener('click', async () => {
     // Build map: turn index → [image, ...]
     const imgAfterTurn = {};
     for (const img of cachedImgs) {
-      const idx = assignImageToTurn(img.generated_at);
+      const idx = assignImageToTurn(img);
       if (!imgAfterTurn[idx]) imgAfterTurn[idx] = [];
       imgAfterTurn[idx].push(img);
     }

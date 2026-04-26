@@ -11,6 +11,10 @@ build/
 # Save files (game sessions)
 saves/
 *.jsonl
+*.jsonl copia
+
+# Claude Code project instructions (internal, not for public repo)
+CLAUDE.md
 
 # Generated scene images (cache rebuilt at runtime)
 scripts/images/scene_cache/
