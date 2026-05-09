@@ -20,6 +20,7 @@
 #include <regex>
 #include <crow/crow_all.h>
 #include <filesystem>
+#include <thread>
 
 using nlohmann::json;
 
@@ -167,9 +168,12 @@ struct Config {
     float       imgStrength  = 0.75f;
     std::string imgLora;            // --img-lora
     float       imgLoraScale = 1.0f; // --img-lora-scale
+    std::string imgLoraModel;       // --i2i-model-lora (default: edit-plus-lora)
 
     // Face-swap
     std::string faceswapUrl;        // --faceswap-url (empty = disabled)
+    std::string pyEnvType = "system"; // system | venv | conda | uv
+    std::string pyEnvPath;            // venv dir or conda env name
 
     // Session tracking — set on first save, used to filter images on load
     std::string sessionStart;       // ISO8601 UTC timestamp of first turn in this session
@@ -247,6 +251,12 @@ struct Config {
 
 struct Message { std::string role; std::string content; std::string player_id; std::string timestamp; };
 
+struct ToolDef {
+    std::string name;
+    std::string description;
+    std::string params_schema;  // JSON Schema string for parameters
+};
+
 static Config cfg;
 
 // Aliases for compatibility with llm_query.h
@@ -276,6 +286,169 @@ std::string& openrouter_app_title= cfg.openrouter_app_title;
 #include "llm_query.h"
 #include "llm_image.h"
 #include "web_page.h"
+
+// forward-declared here; defined after parse_args
+AIProvider provider_from_string(const std::string& s);
+
+// ===========================================================================
+// Settings — file persistence
+// ===========================================================================
+
+static std::string settings_path() { return "./rpgai_settings.json"; }
+
+static json config_to_json() {
+    json j;
+    j["base_path"]        = cfg.basePath;
+    j["provider"]         = cfg.providerName;
+    j["ollama_model"]     = cfg.ollama_model;
+    j["ollama_url"]       = cfg.ollama_baseUrl;
+    j["gemini_model"]     = cfg.gemini_model;
+    j["gemini_key"]       = cfg.gemini_key;
+    j["openai_model"]     = cfg.openai_model;
+    j["openai_key"]       = cfg.openai_key;
+    j["openai_url"]       = cfg.openai_baseUrl;
+    j["claude_model"]     = cfg.claude_model;
+    j["claude_key"]       = cfg.claude_key;
+    j["openrouter_model"] = cfg.openrouter_model;
+    j["openrouter_key"]   = cfg.openrouter_key;
+    j["img_enabled"]      = cfg.imgEnabled;
+    j["img_provider"]     = cfg.imgProvider;
+    j["img_url"]          = cfg.imgUrl;
+    j["img_key"]          = cfg.imgKey;
+    j["img_t2i_model"]    = cfg.imgT2iModel;
+    j["img_i2i_model"]    = cfg.imgI2iModel;
+    j["img_i2i_provider"] = cfg.imgI2iProvider;
+    j["img_i2i_url"]      = cfg.imgI2iUrl;
+    j["img_i2i_key"]      = cfg.imgI2iKey;
+    j["img_width"]        = cfg.imgWidth;
+    j["img_height"]       = cfg.imgHeight;
+    j["img_steps"]        = cfg.imgSteps;
+    j["img_strength"]     = cfg.imgStrength;
+    j["img_lora"]         = cfg.imgLora;
+    j["img_lora_scale"]   = cfg.imgLoraScale;
+    j["img_lora_model"]   = cfg.imgLoraModel;
+    j["faceswap_url"]     = cfg.faceswapUrl;
+    j["py_env_type"]      = cfg.pyEnvType;
+    j["py_env_path"]      = cfg.pyEnvPath;
+    j["max_history"]      = cfg.maxHistory;
+    j["max_retries"]      = cfg.maxRetries;
+    j["save_mode"]        = (cfg.saveMode == SaveMode::FULL) ? "full" : "last";
+    j["save_path"]        = cfg.savePath;
+    j["rag_file"]         = cfg.ragFile;
+    j["rag_examples"]     = cfg.ragExamples;
+    j["embed_provider"]   = cfg.embedProvider;
+    j["embed_model"]      = cfg.embedModel;
+    j["embed_url"]        = cfg.embedUrl;
+    j["embed_key"]        = cfg.embedKey;
+    j["lang_code"]        = cfg.langCode;
+    return j;
+}
+
+static void apply_settings_json(const json& j) {
+    auto gs = [&](const char* k, std::string& f) { if (j.contains(k) && j[k].is_string())          f = j[k]; };
+    auto gi = [&](const char* k, int& f)         { if (j.contains(k) && j[k].is_number_integer())   f = j[k]; };
+    auto gf = [&](const char* k, float& f)       { if (j.contains(k) && j[k].is_number())           f = j[k].get<float>(); };
+    auto gb = [&](const char* k, bool& f)        { if (j.contains(k) && j[k].is_boolean())          f = j[k]; };
+
+    if (j.contains("base_path") && j["base_path"].is_string()) {
+        cfg.basePath = j["base_path"];
+        if (!cfg.basePath.empty() && cfg.basePath.back() != '/') cfg.basePath += '/';
+    }
+    std::string prov;
+    gs("provider", prov);
+    if (!prov.empty()) { cfg.providerName = prov; cfg.provider = provider_from_string(prov); }
+
+    gs("ollama_model",    cfg.ollama_model);
+    gs("ollama_url",      cfg.ollama_baseUrl);
+    gs("gemini_model",    cfg.gemini_model);
+    gs("gemini_key",      cfg.gemini_key);
+    gs("openai_model",    cfg.openai_model);
+    gs("openai_key",      cfg.openai_key);
+    gs("openai_url",      cfg.openai_baseUrl);
+    gs("claude_model",    cfg.claude_model);
+    gs("claude_key",      cfg.claude_key);
+    gs("openrouter_model",cfg.openrouter_model);
+    gs("openrouter_key",  cfg.openrouter_key);
+    gb("img_enabled",     cfg.imgEnabled);
+    gs("img_provider",    cfg.imgProvider);
+    gs("img_url",         cfg.imgUrl);
+    gs("img_key",         cfg.imgKey);
+    gs("img_t2i_model",   cfg.imgT2iModel);
+    gs("img_i2i_model",   cfg.imgI2iModel);
+    gs("img_i2i_provider",cfg.imgI2iProvider);
+    gs("img_i2i_url",     cfg.imgI2iUrl);
+    gs("img_i2i_key",     cfg.imgI2iKey);
+    gi("img_width",       cfg.imgWidth);
+    gi("img_height",      cfg.imgHeight);
+    gi("img_steps",       cfg.imgSteps);
+    gf("img_strength",    cfg.imgStrength);
+    gs("img_lora",        cfg.imgLora);
+    gf("img_lora_scale",  cfg.imgLoraScale);
+    gs("img_lora_model",  cfg.imgLoraModel);
+    gs("faceswap_url",    cfg.faceswapUrl);
+    gs("py_env_type",     cfg.pyEnvType);
+    gs("py_env_path",     cfg.pyEnvPath);
+    gi("max_history",     cfg.maxHistory);
+    gi("max_retries",     cfg.maxRetries);
+    if (j.contains("save_mode") && j["save_mode"].is_string())
+        cfg.saveMode = (j["save_mode"].get<std::string>() == "full") ? SaveMode::FULL : SaveMode::LAST;
+    gs("save_path",       cfg.savePath);
+    gs("rag_file",        cfg.ragFile);
+    gi("rag_examples",    cfg.ragExamples);
+    gs("embed_provider",  cfg.embedProvider);
+    gs("embed_model",     cfg.embedModel);
+    gs("embed_url",       cfg.embedUrl);
+    gs("embed_key",       cfg.embedKey);
+    gs("lang_code",       cfg.langCode);
+}
+
+static void sync_img_cfg_from_config() {
+    img_cfg.provider     = img_provider_from_string(cfg.imgProvider);
+    img_cfg.providerName = cfg.imgProvider;
+    img_cfg.url          = cfg.imgUrl;
+    img_cfg.key          = cfg.imgKey;
+    img_cfg.t2i_model    = cfg.imgT2iModel;
+    img_cfg.i2i_model    = cfg.imgI2iModel;
+    img_cfg.width        = cfg.imgWidth;
+    img_cfg.height       = cfg.imgHeight;
+    img_cfg.steps        = cfg.imgSteps;
+    img_cfg.strength     = cfg.imgStrength;
+    if (!cfg.imgI2iProvider.empty()) {
+        img_cfg.i2i_provider_name = cfg.imgI2iProvider;
+        img_cfg.i2i_provider      = img_provider_from_string(cfg.imgI2iProvider);
+    }
+    img_cfg.i2i_url    = cfg.imgI2iUrl;
+    img_cfg.i2i_key    = cfg.imgI2iKey;
+    img_cfg.lora_name  = cfg.imgLora;
+    img_cfg.lora_scale = cfg.imgLoraScale;
+    img_cfg.lora_model = cfg.imgLoraModel;
+}
+
+static bool load_settings_file() {
+    std::ifstream in(settings_path());
+    if (!in.is_open()) return false;
+    try { apply_settings_json(json::parse(in)); return true; }
+    catch (...) { return false; }
+}
+
+static void save_settings_file() {
+    std::ofstream out(settings_path());
+    if (out.is_open()) out << config_to_json().dump(2);
+}
+
+// Quick HTTP reachability check (HEAD, 2s timeout)
+static bool http_ping(const std::string& url) {
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 2L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    CURLcode rc = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    return rc == CURLE_OK;
+}
 
 // ===========================================================================
 // RAG ENGINE
@@ -532,8 +705,26 @@ bool load_session_from_jsonl(const std::string& filename,
     if (last_line.empty()) { std::cerr << "[ERROR] Save file is empty.\n"; return false; }
     try {
         auto j = json::parse(last_line);
-        sol::table res = lua["restore_state"](j["state_after"].get<std::string>());
-        if (!res["success"]) { std::cerr << "[ERROR] Lua restore failed.\n"; return false; }
+        sol::protected_function restore_fn = lua["restore_state"];
+        sol::protected_function_result pfr = restore_fn(j["state_after"].get<std::string>());
+        if (!pfr.valid()) {
+            sol::error err = pfr;
+            std::cerr << "[ERROR] restore_state error: " << err.what() << "\n";
+            return false;
+        }
+        // restore_state may return a result table or nothing (nil = success assumed).
+        if (pfr.get_type() == sol::type::table) {
+            sol::table res = pfr;
+            sol::object ok_val  = res["success"];
+            sol::object err_val = res["error"];
+            bool ok = (ok_val.get_type() == sol::type::boolean) ? ok_val.as<bool>() : true;
+            if (!ok) {
+                std::string errmsg = (err_val.get_type() == sol::type::string)
+                                     ? err_val.as<std::string>() : "";
+                std::cerr << "[ERROR] Lua restore failed: " << errmsg << "\n";
+                return false;
+            }
+        }
         history.clear();
         for (const auto& item : j["chat_history"])
             history.push_back({item.value("role",""), item.value("content",""), item.value("player_id",""), item.value("timestamp","")});
@@ -785,6 +976,104 @@ std::string query_llm(AIProvider provider,
     }
 }
 
+// ===========================================================================
+// TOOL CALLING SUBSYSTEM
+// ===========================================================================
+
+// Script-defined tools for the current session.
+// Populated by load_script_tools(); cleared on every script reload.
+static std::vector<ToolDef>                              active_tools;
+static std::map<std::string, sol::protected_function>    active_tool_fns;
+static bool                                              script_has_tools = false;
+
+// Dispatches one LLM call with tool support.
+// Falls back to standard schema mode for providers without tool calling (Gemini, Ollama).
+static std::string query_llm_with_tools(
+        AIProvider provider,
+        const std::string& sys_prompt,
+        const std::vector<Message>& history,
+        const std::string& user_prompt,
+        const std::string& json_schema,
+        const std::vector<ToolDef>& tools,
+        std::function<std::string(const std::string&, const std::string&)> executor,
+        const std::string& model,
+        int max_iter = 8)
+{
+    switch (provider) {
+        case AIProvider::OPENAI:
+            return openai_tool_loop(cfg.openai_baseUrl, cfg.openai_key, model,
+                sys_prompt, history, user_prompt, json_schema, tools, executor, max_iter);
+        case AIProvider::OPENROUTER:
+            return openai_tool_loop(cfg.openrouter_baseUrl, cfg.openrouter_key, model,
+                sys_prompt, history, user_prompt, json_schema, tools, executor, max_iter);
+        case AIProvider::CLAUDE:
+            return claude_tool_loop(sys_prompt, history, user_prompt, model,
+                tools, executor, max_iter);
+        default:
+            std::cerr << "[TOOLS] Provider doesn't support tool calling; falling back to schema mode\n";
+            return query_llm(provider, sys_prompt, history, user_prompt, json_schema, model);
+    }
+}
+
+// Execute a named tool by calling its Lua function.
+// Called synchronously from within query_llm_with_tools — lua_mutex must already be held.
+static std::string execute_tool(const std::string& name, const std::string& args_json) {
+    auto it = active_tool_fns.find(name);
+    if (it == active_tool_fns.end())
+        return json{{"error", "unknown tool: " + name}}.dump();
+    try {
+        sol::protected_function_result r = it->second(args_json);
+        if (!r.valid()) {
+            sol::error err = r;
+            return json{{"error", std::string(err.what())}}.dump();
+        }
+        auto ret = r.get<sol::optional<std::string>>();
+        return ret.value_or(json{{"result","ok"}}.dump());
+    } catch (const std::exception& e) {
+        return json{{"error", std::string(e.what())}}.dump();
+    }
+}
+
+// Load tools from the current Lua script. Call after every script_file() load.
+// Idempotent: clears previous tools before populating.
+static void load_script_tools(sol::state& lua) {
+    active_tools.clear();
+    active_tool_fns.clear();
+    script_has_tools = false;
+
+    sol::protected_function gtools = lua["get_tools"];
+    if (!gtools.valid()) return;
+
+    sol::protected_function_result r = gtools();
+    if (!r.valid()) {
+        sol::error err = r;
+        std::cerr << "[TOOLS] get_tools() error: " << err.what() << "\n";
+        return;
+    }
+
+    sol::table tbl = r;
+    for (auto& [k, v] : tbl) {
+        if (v.get_type() != sol::type::table) continue;
+        sol::table entry = v.as<sol::table>();
+
+        ToolDef td;
+        td.name          = entry.get_or<std::string>("name", "");
+        td.description   = entry.get_or<std::string>("description", "");
+        td.params_schema = entry.get_or<std::string>("params", "{}");
+        if (td.name.empty()) continue;
+
+        sol::protected_function fn = entry["fn"];
+        if (!fn.valid()) continue;
+
+        active_tools.push_back(td);
+        active_tool_fns[td.name] = fn;
+    }
+
+    script_has_tools = !active_tools.empty();
+    if (script_has_tools)
+        print_system("Tools loaded: " + std::to_string(active_tools.size()));
+}
+
 AIProvider provider_from_string(const std::string& s) {
     if (s == "gemini")     return AIProvider::GEMINI;
     if (s == "openai")     return AIProvider::OPENAI;
@@ -887,8 +1176,9 @@ bool parse_args(int argc, char* argv[]) {
         else if (arg == "--img-i2i-provider") { cfg.imgI2iProvider = next(); }
         else if (arg == "--img-i2i-url")   { cfg.imgI2iUrl    = next(); }
         else if (arg == "--img-i2i-key")   { cfg.imgI2iKey    = next(); }
-        else if (arg == "--img-lora")      { cfg.imgLora       = next(); }
-        else if (arg == "--img-lora-scale"){ cfg.imgLoraScale   = std::stof(next()); }
+        else if (arg == "--img-lora")       { cfg.imgLora       = next(); }
+        else if (arg == "--img-lora-scale") { cfg.imgLoraScale   = std::stof(next()); }
+        else if (arg == "--i2i-model-lora") { cfg.imgLoraModel   = next(); }
         else if (arg == "--faceswap-url")  { cfg.faceswapUrl   = next(); }
         else if (arg == "--web")           { cfg.webMode     = true; }
         else if (arg == "--rag")           { cfg.ragFile     = next(); }
@@ -923,7 +1213,8 @@ bool parse_args(int argc, char* argv[]) {
 int main(int argc, char* argv[]) {
     init_ansi();
 
-    if (!parse_args(argc, argv)) return 1;
+    load_settings_file();              // base: file-saved settings
+    if (!parse_args(argc, argv)) return 1;  // CLI overrides file
 
     std::string key_error = cfg.validate();
     if (!key_error.empty()) { print_error(key_error); return 1; }
@@ -970,6 +1261,7 @@ int main(int argc, char* argv[]) {
         img_cfg.i2i_key           = cfg.imgI2iKey;
         img_cfg.lora_name         = cfg.imgLora;
         img_cfg.lora_scale        = cfg.imgLoraScale;
+        img_cfg.lora_model        = cfg.imgLoraModel;
         print_system("Image t2i:  provider=" + cfg.imgProvider + " url=" + cfg.imgUrl);
         if (!cfg.imgI2iProvider.empty())
             print_system("Image i2i:  provider=" + cfg.imgI2iProvider
@@ -1004,7 +1296,11 @@ int main(int argc, char* argv[]) {
     sol::state lua;
     lua.open_libraries(sol::lib::base, sol::lib::package, sol::lib::string,
                        sol::lib::table, sol::lib::math, sol::lib::os,sol::lib::debug);
-    lua["package"]["path"] = cfg.basePath + "lib/?.lua;" + lua["package"]["path"].get<std::string>();
+    const std::string lua_default_path = lua["package"]["path"].get<std::string>();
+    auto update_lua_path = [&]() {
+        lua["package"]["path"] = cfg.basePath + "lib/?.lua;" + lua_default_path;
+    };
+    update_lua_path();
 
     // Expose current language code to Lua scripts.
     // Scripts can read LANG directly or call get_lang() to decide
@@ -1102,7 +1398,10 @@ int main(int argc, char* argv[]) {
             return cosine_similarity(va, vb);
         });
 
-    lua.script_file(cfg.basePath + cfg.script);
+    if (!cfg.webMode) {
+        lua.script_file(cfg.basePath + cfg.script);
+        load_script_tools(lua);
+    }
 
     // --- Session init ---
     std::vector<Message> chat_history;
@@ -1488,8 +1787,12 @@ int main(int argc, char* argv[]) {
                               "/" + std::to_string(cfg.maxRetries - 1) + "...");
 
             auto trimmed = trim_history(chat_history, cfg.maxHistory);
-            std::string llm_reply = query_llm(cfg.provider, with_lang(effective_sys_prompt), trimmed,
-                                              user_prompt, json_schema_console, active_model);
+            std::string llm_reply = script_has_tools
+                ? query_llm_with_tools(cfg.provider, with_lang(effective_sys_prompt), trimmed,
+                                       user_prompt, json_schema_console, active_tools,
+                                       execute_tool, active_model)
+                : query_llm(cfg.provider, with_lang(effective_sys_prompt), trimmed,
+                            user_prompt, json_schema_console, active_model);
 
             //sol::table result = lua["process_ai_response"](llm_reply);
 
@@ -1623,8 +1926,12 @@ sol::table result = f_result;
 
             for (int attempt = 0; attempt < cfg.maxRetries; ++attempt) {
                 auto trimmed  = trim_history(hist, cfg.maxHistory);
-                std::string reply = query_llm(cfg.provider, with_lang(sys_prompt), trimmed,
-                                              user_prompt, schema, cfg.activeModel());
+                std::string reply = script_has_tools
+                    ? query_llm_with_tools(cfg.provider, with_lang(sys_prompt), trimmed,
+                                           user_prompt, schema, active_tools,
+                                           execute_tool, cfg.activeModel())
+                    : query_llm(cfg.provider, with_lang(sys_prompt), trimmed,
+                                user_prompt, schema, cfg.activeModel());
 
                 sol::protected_function pf = lua["process_ai_response"];
                 sol::function tb           = lua["debug"]["traceback"];
@@ -1651,6 +1958,17 @@ sol::table result = f_result;
                 std::string display   = lua["get_display_state"]();
                 std::string snap      = lua["get_state_snapshot"]();
 
+                // Optional: suggested_actions (array of strings from script)
+                json suggested = json::array();
+                sol::object sa_obj = res["suggested_actions"];
+                if (sa_obj.valid() && sa_obj.get_type() == sol::type::table) {
+                    sol::table sa_tbl = sa_obj.as<sol::table>();
+                    for (auto& kv : sa_tbl) {
+                        if (kv.second.get_type() == sol::type::string)
+                            suggested.push_back(kv.second.as<std::string>());
+                    }
+                }
+
                 hist.push_back({"user",      player_input, "player"});
                 hist.push_back({"assistant", reply,        "gm"});
 
@@ -1660,10 +1978,11 @@ sol::table result = f_result;
                 web_last_llm_reply    = reply;
                 web_last_player_input = player_input;
 
-                result_json["success"]         = true;
-                result_json["narration"]        = narration;
-                result_json["display"]          = display;
-                result_json["game_over"]        = game_over;
+                result_json["success"]            = true;
+                result_json["narration"]           = narration;
+                result_json["display"]             = display;
+                result_json["game_over"]           = game_over;
+                result_json["suggested_actions"]   = suggested;
                 result_json["game_over_reason"] = go_reason;
                 return result_json;
             }
@@ -1692,15 +2011,18 @@ sol::table result = f_result;
             json result;
             json arr = json::array();
             try {
-                for (const auto& e : std::filesystem::directory_iterator(cfg.basePath)) {
-                    if (e.is_regular_file() && e.path().extension() == ".lua") {
-                        std::string fn = e.path().filename().string();
-                        if (fn[0] != '_') arr.push_back(fn);
+                if (std::filesystem::is_directory(cfg.basePath)) {
+                    for (const auto& e : std::filesystem::directory_iterator(cfg.basePath)) {
+                        if (e.is_regular_file() && e.path().extension() == ".lua") {
+                            std::string fn = e.path().filename().string();
+                            if (fn[0] != '_') arr.push_back(fn);
+                        }
                     }
+                    std::sort(arr.begin(), arr.end());
                 }
-                std::sort(arr.begin(), arr.end());
                 result["success"] = true;
                 result["scripts"] = arr;
+                result["path"]    = cfg.basePath;
             } catch (const std::exception& ex) {
                 result["success"] = false;
                 result["error"]   = std::string(ex.what());
@@ -1781,7 +2103,26 @@ sol::table result = f_result;
                 }
 
                 cfg.script = script_name;
+
+                // Derive a save file name from the script so a new session never
+                // overwrites a save that was loaded from a different script.
+                // strip .lua suffix → append _session.jsonl
+                {
+                    std::string base = script_name;
+                    auto dot = base.rfind(".lua");
+                    if (dot != std::string::npos) base = base.substr(0, dot);
+                    cfg.saveFile = base + "_session.jsonl";
+                }
+                // Close any previously open FULL-mode stream.
+                if (full_stream.is_open()) full_stream.close();
+
+                // Clear optional globals so they don't bleed from a previously loaded script.
+                for (const char* fn : {"get_commands", "get_scene_images",
+                                       "get_asset_path", "get_asset_prompt", "get_tools"}) {
+                    lua[fn] = sol::lua_nil;
+                }
                 lua.script_file(cfg.basePath + cfg.script);
+                load_script_tools(lua);
 
                 chat_history.clear();
                 web_last_llm_reply.clear();
@@ -1894,6 +2235,10 @@ sol::table result = f_result;
                 } catch (...) {}
 
                 cfg.script = script_to_load;
+                for (const char* fn : {"get_commands", "get_scene_images",
+                                       "get_asset_path", "get_asset_prompt"}) {
+                    lua[fn] = sol::lua_nil;
+                }
                 lua.script_file(cfg.basePath + cfg.script);
 
                 chat_history.clear();
@@ -2345,13 +2690,15 @@ sol::table result = f_result;
             }
 
             bool partial = false;
-            std::string img_mode;         // "" | "regen" | "refine" | "fix"
+            bool apply_lora = false;
+            std::string img_mode;         // "" | "regen" | "refine" | "fix" | "compose"
             std::string img_instruction;  // user instruction for "fix" mode
             float img_strength_override = -1.0f; // <0 = use img_cfg.strength
             try {
                 if (!req.body.empty()) {
                     auto body    = json::parse(req.body);
                     partial      = body.value("partial", false);
+                    apply_lora   = body.value("lora", false);
                     img_mode     = body.value("mode", "");
                     img_instruction = body.value("instruction", "");
                 }
@@ -2411,6 +2758,16 @@ sol::table result = f_result;
             //   "last"             → find the most recent cached scene with
             //                        the same asset set and use it as i2i base
             //   any other string   → treat as a file path and use directly
+
+            // If the script returns nil, it has no scene images defined.
+            if (pfr.get_type() == sol::type::lua_nil) {
+                result["success"] = false;
+                result["error"]   = "No scene images defined for this script. "
+                                    "Implement get_scene_images() and use /generate_asset <id> "
+                                    "to create assets first.";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
 
             sol::table img_table = pfr;
             std::vector<CollageEntry> available;
@@ -2483,6 +2840,19 @@ sol::table result = f_result;
                     missing_note += m["id"].get<std::string>() + " ";
             }
 
+            // Optional style hook — captured while mutex is held, copied to thread
+            std::string image_style;
+            {
+                sol::protected_function fn = lua["get_image_style"];
+                if (fn.valid()) {
+                    auto r = fn();
+                    if (r.valid()) {
+                        sol::optional<std::string> s = r;
+                        if (s) image_style = *s;
+                    }
+                }
+            }
+
             // Create job and launch thread (copy needed data — no Lua pointers)
             std::string job_id = new_job_id();
             {
@@ -2496,6 +2866,7 @@ sol::table result = f_result;
             std::string state_copy  = cur_state;
             std::string narr_copy   = last_narr;
             std::string miss_copy   = missing_note;
+            std::string style_copy  = image_style;
             int collage_h           = img_cfg.height;
             std::string script_copy = cfg.script;
             std::string base_copy   = cfg.basePath;
@@ -2504,6 +2875,7 @@ sol::table result = f_result;
             std::string instruction_copy = img_instruction;
             std::string sess_start_copy  = cfg.sessionStart;
             float       strength_copy    = img_strength_override;
+            bool        lora_copy        = apply_lora;
 
             launch_image_job(job_id, [=]() -> std::pair<std::vector<uint8_t>, std::string> {
                 // Resolve i2i base image path / bytes.
@@ -2627,7 +2999,7 @@ sol::table result = f_result;
                         layout_prefix += std::to_string(npc_count) +
                                          " characters are naturally distributed within the scene. ";
 
-                    std::string prompt_sys =
+                    /*std::string prompt_sys =
                         "You are a visual prompt engineer for Stable Diffusion and image editing models. "
                         "Given a reference image and scene context, write a concise image generation prompt.\n"
                         "STRICT RULES:\n"
@@ -2638,7 +3010,22 @@ sol::table result = f_result;
                         "(e.g. 'young woman with dark curly hair and green eyes' instead of a name).\n"
                         "3. NEVER include dialogue, inner thoughts, or narrative text.\n"
                         "4. Use comma-separated tags and short descriptive phrases. "
-                        "Photorealistic style. Max 100 words. No JSON, no lists, no quotes.";
+                        "Photorealistic style. Max 100 words. No JSON, no lists, no quotes.";*/
+
+                    std::string prompt_sys =
+                        "You are an expert visual prompt engineer for Stable Diffusion. "
+                        "Given a scene context and a reference image, write a highly descriptive image generation prompt.\n"
+                        "STRICT RULES:\n"
+                        "1. FOCUS ON PHYSICAL INTERACTION: You MUST explicitly translate narrative actions into precise, literal body poses. "
+                        "Describe exactly where hands, faces, and limbs are positioned relative to the other characters. "
+                        "Do not abstract the core action.\n"
+                        "2. Describe ONLY visual elements: exact anatomical posing, physical proximity, lighting, setting, "
+                        "atmosphere, and facial expressions.\n"
+                        "3. NEVER use character names, place names, or proper nouns. Use physical descriptors "
+                        "(e.g. 'young woman with dark hair', 'tall man').\n"
+                        "4. NEVER include dialogue, inner thoughts, metaphors, narrative text, or off-screen elements (e.g., people in another room).\n"
+                        "5. Define the camera angle and focal point (e.g., 'close-up on faces', 'wide shot of the room').\n"
+                        "6. Format: comma-separated tags, short descriptive phrases. Photorealistic style. Max 100 words. No JSON, no lists.";
 
                     std::string prompt_user =
                         "Scene assets in order: " + tags + miss_copy +
@@ -2652,15 +3039,19 @@ sol::table result = f_result;
                     }
                     prompt_user += "\n\nWrite the image generation prompt in English. "
                                    "Remember: no character names, visual descriptors only.";
+                    if (!style_copy.empty())
+                        prompt_user += "\n\nVisual style to preserve: " + style_copy;
 
                     img_prompt = ::query_llm(
                         ::cfg.provider, prompt_sys, {}, prompt_user, "", ::cfg.activeModel());
 
-                    // Prepend layout prefix + append face-preservation tokens
+                    // Prepend layout prefix + append face-preservation tokens + optional style
                     img_prompt = layout_prefix + img_prompt +
                         ", preserve facial features of all characters, maintain face identity, "
                         "keep faces unchanged from reference, consistent character appearance, "
                         "high fidelity face reproduction, faithful to reference image";
+                    if (!style_copy.empty())
+                        img_prompt += ", " + style_copy;
                 }
 
                 std::cerr << "[IMG] Scene prompt: " << img_prompt.substr(0, 120) << "...\n";
@@ -2676,7 +3067,8 @@ sol::table result = f_result;
                 auto img_bytes = image_to_image(collage, img_prompt,
                                                 base_copy, script_copy, entries_copy,
                                                 base_image_path, bypass_cache,
-                                                sess_start_copy, base_image_bytes);
+                                                sess_start_copy, base_image_bytes,
+                                                lora_copy);
                 img_cfg.strength = saved_strength;  // restore
                 return {std::move(img_bytes), img_prompt};
             });
@@ -2935,8 +3327,8 @@ sol::table result = f_result;
                 if (label) item["label"] = label;
                 cmds.push_back(item);
             };
-            eng("/image",         "Generate scene image. Modes: regen (bypass cache), refine (reuse last render), fix [--s N] <instruction> (re-edit), compose (anti-collage: use background as base, strength 0.95). Add --partial to allow missing assets.",
-                false, "/image [regen|refine|fix [--s 0.9] <text>|compose [--s N]] [--partial]");
+            eng("/image",         "Generate scene image. Add 'lora' to apply LoRA via /image lora command. Modes: regen, refine, fix [--s N] <instruction>, compose. Combine: /image lora regen, /image lora fix <text>. Add --partial to allow missing assets.",
+                false, "/image [lora] [regen|refine|fix [--s 0.9] <text>|compose [--s N]] [--partial]");
             eng("/swap",          "Face-swap: replace detected faces left-to-right with NPC asset faces. Use 'null' to skip a slot, '--enhance' to run GFPGAN after swap. Requires --faceswap-url.",
                 false, "/swap [--enhance] <id1> [null] <id2> ...");
             eng("/show_asset",    "Show a script asset by ID. Usage: /show_asset <id>",
@@ -3172,13 +3564,220 @@ sol::table result = f_result;
         });
 
         // -----------------------------------------------------------------
+        // POST /api/scripts/upload  →  save uploaded .lua to basePath
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/scripts/upload").methods("POST"_method)([&](const crow::request& req) {
+            json result;
+            try {
+                auto body    = json::parse(req.body);
+                std::string name    = body.value("name", "");
+                std::string content = body.value("content", "");
+                if (name.empty() ||
+                    name.find('/') != std::string::npos ||
+                    name.find("..") != std::string::npos ||
+                    name.size() < 5 ||
+                    name.substr(name.size() - 4) != ".lua") {
+                    result["success"] = false;
+                    result["error"]   = "Invalid filename (must be *.lua, no path separators)";
+                } else {
+                    std::string dest = cfg.basePath + name;
+                    std::ofstream out(dest);
+                    if (!out.is_open()) throw std::runtime_error("Cannot write: " + dest);
+                    out << content;
+                    result["success"] = true;
+                    result["path"]    = dest;
+                }
+            } catch (const std::exception& e) {
+                result["success"] = false;
+                result["error"]   = e.what();
+            }
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // GET /api/scripts/download?name=<file>  →  serve .lua as download
+        CROW_ROUTE(app, "/api/scripts/download")([&](const crow::request& req) {
+            const char* raw = req.url_params.get("name");
+            std::string name = raw ? raw : "";
+            if (name.empty() ||
+                name.find('/') != std::string::npos ||
+                name.find("..") != std::string::npos ||
+                name.size() < 5 ||
+                name.substr(name.size() - 4) != ".lua") {
+                crow::response res(400, "Invalid filename");
+                return res;
+            }
+            std::ifstream f(cfg.basePath + name, std::ios::binary);
+            if (!f.is_open()) { crow::response res(404, "Not found"); return res; }
+            std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            crow::response res(content);
+            res.set_header("Content-Type", "text/plain; charset=utf-8");
+            res.set_header("Content-Disposition", "attachment; filename=\"" + name + "\"");
+            return res;
+        });
+
+        // -----------------------------------------------------------------
+        // GET /api/settings  →  current config as JSON
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/settings")([&]() {
+            json r = config_to_json();
+            r["success"] = true;
+            crow::response res(r.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // POST /api/settings  →  update config and persist to file
+        CROW_ROUTE(app, "/api/settings").methods("POST"_method)([&](const crow::request& req) {
+            json result;
+            try {
+                auto body = json::parse(req.body);
+                std::lock_guard<std::mutex> lk(lua_mutex);
+                apply_settings_json(body);
+                update_lua_path();
+                if (cfg.imgEnabled) sync_img_cfg_from_config();
+                save_settings_file();
+                result["success"] = true;
+                result["message"] = "Settings saved";
+            } catch (const std::exception& e) {
+                result["success"] = false;
+                result["error"]   = e.what();
+            }
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // GET /api/servers/status  →  reachability of local helper servers
+        CROW_ROUTE(app, "/api/servers/status")([&]() {
+            json r;
+            r["faceswap_locale"] = http_ping("http://localhost:8001/");
+            r["qwen_locale"] = http_ping("http://localhost:8002/");
+            r["t2i_locale"]  = http_ping("http://localhost:8003/");
+            r["success"] = true;
+            crow::response res(r.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // POST /api/servers/action  →  install/start/stop faceswap_locale, qwen_locale, t2i_locale
+        CROW_ROUTE(app, "/api/servers/action").methods("POST"_method)([&](const crow::request& req) {
+            json result;
+            try {
+                auto body   = json::parse(req.body);
+                std::string server = body.value("server", "");
+                std::string action = body.value("action", "");
+
+                std::string script_path, log_file, pip_deps;
+                if (server == "faceswap_locale") {
+                    script_path = "./faceswap_locale/server.py";
+                    log_file    = "/tmp/rpgai_faceswap_locale.log";
+                    pip_deps    = "insightface onnxruntime fastapi uvicorn python-multipart pillow numpy opencv-python-headless";
+                } else if (server == "qwen_locale") {
+                    script_path = "./qwen_locale/server_locale.py";
+                    log_file    = "/tmp/rpgai_qwen.log";
+                    pip_deps    = "diffusers torch transformers accelerate fastapi uvicorn pillow";
+                } else if (server == "t2i_locale") {
+                    script_path = "./t2i_locale/server.py";
+                    log_file    = "/tmp/rpgai_t2i.log";
+                    pip_deps    = "diffusers torch transformers accelerate fastapi uvicorn pillow pydantic";
+                } else {
+                    result["success"] = false;
+                    result["error"]   = "Unknown server: " + server;
+                    crow::response res(result.dump());
+                    res.set_header("Content-Type", "application/json");
+                    return res;
+                }
+
+                // Build python/pip invocation from configured environment.
+                auto py_cmd = [&]() -> std::string {
+                    if (cfg.pyEnvType == "venv")  return cfg.pyEnvPath + "/bin/python3";
+                    if (cfg.pyEnvType == "conda") return "conda run -n " + cfg.pyEnvPath + " python";
+                    if (cfg.pyEnvType == "uv")    return "uv run python";
+                    return "python3";
+                };
+                auto pip_cmd = [&]() -> std::string {
+                    if (cfg.pyEnvType == "venv")  return cfg.pyEnvPath + "/bin/pip";
+                    if (cfg.pyEnvType == "conda") return "conda run -n " + cfg.pyEnvPath + " pip";
+                    if (cfg.pyEnvType == "uv")    return "uv pip";
+                    return "pip3";
+                };
+
+                if (action == "start") {
+                    std::string cmd = "nohup " + py_cmd() + " " + script_path + " > " + log_file + " 2>&1 &";
+                    system(cmd.c_str());
+                    result["success"] = true;
+                    result["message"] = "Starting " + server + " — log: " + log_file;
+                } else if (action == "stop") {
+                    std::string cmd = "pkill -f '" + script_path + "'";
+                    system(cmd.c_str());
+                    result["success"] = true;
+                    result["message"] = "Stop signal sent to " + server;
+                } else if (action == "install") {
+                    std::string cmd = "nohup " + pip_cmd() + " install " + pip_deps + " > " + log_file + " 2>&1 &";
+                    system(cmd.c_str());
+                    result["success"] = true;
+                    result["message"] = "Installing " + server + " deps — log: " + log_file;
+                } else {
+                    result["success"] = false;
+                    result["error"]   = "Unknown action: " + action;
+                }
+            } catch (const std::exception& e) {
+                result["success"] = false;
+                result["error"]   = e.what();
+            }
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // GET /api/servers/models/t2i_locale  →  proxy model list from Python server
+        CROW_ROUTE(app, "/api/servers/models/t2i_locale")([&]() {
+            json result;
+            try {
+                std::string resp = img_detail::http_get("http://127.0.0.1:8003/models");
+                auto j = json::parse(resp);
+                result["success"] = true;
+                result["models"]  = j.value("models",  json::array());
+                result["loaded"]  = j.value("loaded",  json());
+            } catch (const std::exception& e) {
+                result["success"] = false;
+                result["models"]  = json::array();
+                result["loaded"]  = nullptr;
+                result["error"]   = e.what();
+            }
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // -----------------------------------------------------------------
         // Start server
         // -----------------------------------------------------------------
         int port = 8080;
-        print_system("Web mode — http://localhost:" + std::to_string(port));
+        std::string url = "http://localhost:" + std::to_string(port);
+        // OSC 8 hyperlink sequences
+        static const std::string ESC_ST = "\033\\"; // ESC + backslash (string terminator)
+        std::string link_open  = "\033]8;;" + url + ESC_ST;
+        std::string link_close = "\033]8;;" + ESC_ST;
+        std::string clickable  = link_open + url + link_close;
+        print_system("Web mode -> " + clickable);
+        // Open browser after Crow binds the port
+        std::thread([url]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+#ifdef __APPLE__
+            std::system(("open " + url).c_str());
+#elif defined(__linux__)
+            std::system(("xdg-open " + url).c_str());
+#elif defined(_WIN32)
+            std::system(("start " + url).c_str());
+#endif
+        }).detach();
         print_system("Routes: GET /  /api/scripts  /api/saves  /api/status  /api/show_asset  /api/scene_image  /api/commands");
         print_system("        POST /api/start  /api/init  /api/load  /api/chat  /api/command  /api/save");
         print_system("        POST /api/image  /api/generate_asset  /api/swap  GET /api/image/job/<id>");
+        print_system("        GET|POST /api/settings  GET /api/servers/status  POST /api/servers/action");
         if (cfg.imgEnabled)
             print_system("Image:  provider=" + cfg.imgProvider + " url=" + cfg.imgUrl);
         if (!cfg.faceswapUrl.empty())

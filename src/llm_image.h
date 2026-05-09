@@ -64,6 +64,7 @@ enum class ImageProvider {
     AIMLAPI,         // AI/ML API — wrapper OpenAI-compatible per Qwen-Image-Edit
     WAVESPEED,       // wavespeed.ai — Qwen-Image-Edit-2511, polling asincrono
     QWEN_LOCAL,      // local Python server (qwen_locale/server_locale.py)
+    T2I_LOCAL,       // local Python server (t2i_locale/server.py) — txt2img only
 };
 
 // These fields are read from cfg in main.cpp — same global variable aliases
@@ -103,9 +104,10 @@ struct ImageConfig {
     int           poll_interval_ms = 2000;   // ms tra un poll e l'altro per SDCPP
     int           poll_timeout_s   = 120;    // timeout totale generazione
 
-    // LoRA — used by QWEN_LOCAL provider; ignored by cloud providers
-    std::string   lora_name;      // subfolder name under qwen_locale/loras/
+    // LoRA — local name (qwen_local) or https:// URL (WaveSpeed, other cloud providers)
+    std::string   lora_name;      // local subfolder or https:// URL
     float         lora_scale    = 1.0f;
+    std::string   lora_model;     // model for /image lora — default: edit-plus-lora
 
     // Session boundary — UTC ISO8601 timestamp of the first turn in this session.
     // Cache lookups ignore entries generated before this time (previous runs).
@@ -1447,6 +1449,12 @@ namespace wavespeed {
 
 static const std::string WS_BASE = "https://api.wavespeed.ai";
 
+// Models that accept an array of images ("images") with LoRA.
+// Everything else accepts a single "image" string.
+static const std::set<std::string> WS_MULTI_IMAGE_LORA_MODELS = {
+    "wavespeed-ai/qwen-image/edit-plus-lora",
+};
+
 static std::string auth_header() {
     const std::string& key = img_cfg.i2i_key.empty()
         ? (img_cfg.key.empty() ? openai_api_key : img_cfg.key)
@@ -1528,28 +1536,58 @@ static std::vector<uint8_t> poll_result(const std::string& prediction_id) {
 
 inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
                                      const std::string& prompt,
-                                     const std::vector<std::vector<uint8_t>>& extra_refs = {}) {
-    std::string model = img_cfg.i2i_model.empty()
-        ? "wavespeed-ai/qwen-image/edit-2511"
-        : img_cfg.i2i_model;
+                                     const std::vector<std::vector<uint8_t>>& extra_refs = {},
+                                     bool apply_lora = false) {
+    std::string model;
+    if (apply_lora) {
+        model = img_cfg.lora_model.empty()
+            ? "wavespeed-ai/qwen-image/edit-plus-lora"
+            : img_cfg.lora_model;
+    } else {
+        model = img_cfg.i2i_model.empty()
+            ? "wavespeed-ai/qwen-image/edit-2511"
+            : img_cfg.i2i_model;
+    }
 
-    // Strip any leading slash or duplicate "wavespeed-ai/" prefix
+    // Strip any leading slash
     if (!model.empty() && model[0] == '/') model = model.substr(1);
 
     std::string url = WS_BASE + "/api/v3/" + model;
 
-    json imgs = json::array({bytes_to_base64(collage_bytes)});
-    for (const auto& ref : extra_refs)
-        imgs.push_back(bytes_to_base64(ref));
-    std::cerr << "[IMG] WaveSpeed images count: " << imgs.size() << "\n";
-
     json req;
     req["prompt"]               = prompt;
-    req["images"]               = imgs;
     req["seed"]                 = -1;
     req["output_format"]        = "jpeg";
     req["enable_base64_output"] = true;
     req["enable_sync_mode"]     = false;
+
+    if (apply_lora) {
+        const bool is_multi = WS_MULTI_IMAGE_LORA_MODELS.count(model) > 0;
+        if (is_multi) {
+            // edit-plus-lora: "images" array (max 3 total)
+            json imgs = json::array({bytes_to_base64(collage_bytes)});
+            for (size_t i = 0; i < extra_refs.size() && imgs.size() < 3; ++i)
+                imgs.push_back(bytes_to_base64(extra_refs[i]));
+            req["images"] = imgs;
+            std::cerr << "[IMG] WaveSpeed LoRA multi-image: " << imgs.size() << " imgs\n";
+        } else {
+            // edit-lora / flux-kontext: single "image" (collage with all assets merged)
+            req["image"] = bytes_to_base64(collage_bytes);
+            std::cerr << "[IMG] WaveSpeed LoRA single-image\n";
+        }
+        if (!img_cfg.lora_name.empty()) {
+            req["loras"] = json::array({ {{"path", img_cfg.lora_name}, {"scale", img_cfg.lora_scale}} });
+            std::cerr << "[IMG] WaveSpeed LoRA: " << img_cfg.lora_name
+                      << "  scale=" << img_cfg.lora_scale << "\n";
+        }
+    } else {
+        // edit-2511: "images" array (supports bg + NPC refs)
+        json imgs = json::array({bytes_to_base64(collage_bytes)});
+        for (const auto& ref : extra_refs)
+            imgs.push_back(bytes_to_base64(ref));
+        std::cerr << "[IMG] WaveSpeed images count: " << imgs.size() << "\n";
+        req["images"] = imgs;
+    }
 
     std::string resp = img_detail::http_post_json(url, req.dump(), auth_header());
     auto j = json::parse(resp);
@@ -1625,6 +1663,39 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
 } // namespace qwen_local
 
 // =============================================================================
+// t2i_local — local Python server (t2i_locale/server.py)
+//   POST /txt2img  JSON: { prompt, model?, steps?, width?, height?, guidance_scale? }
+//   Response: JSON { "image": "<base64 PNG>", "model": "<name>" }
+// =============================================================================
+
+namespace t2i_local {
+
+inline std::vector<uint8_t> txt2img(const std::string& prompt) {
+    std::string url = img_cfg.url.empty()
+        ? "http://127.0.0.1:8003/txt2img"
+        : img_cfg.url + "/txt2img";
+
+    json req;
+    req["prompt"]         = prompt;
+    req["steps"]          = img_cfg.steps;
+    req["width"]          = img_cfg.width;
+    req["height"]         = img_cfg.height;
+    req["guidance_scale"] = 7.5;
+    if (!img_cfg.t2i_model.empty())
+        req["model"] = img_cfg.t2i_model;
+
+    std::string resp = img_detail::http_post_json(url, req.dump());
+
+    auto j = json::parse(resp);
+    if (!j.contains("image") || j["image"].get<std::string>().empty())
+        throw std::runtime_error("[IMG] t2i_local: no image in response: " + resp.substr(0, 200));
+
+    return base64_to_bytes(j["image"].get<std::string>());
+}
+
+} // namespace t2i_local
+
+// =============================================================================
 // Public API — text_to_image and image_to_image
 // Dispatch based on img_cfg.provider
 // =============================================================================
@@ -1639,7 +1710,8 @@ inline std::vector<uint8_t> text_to_image(const std::string& prompt,
         case ImageProvider::OPENROUTER_IMG:  result = openrouter_img::txt2img(prompt); break;
         case ImageProvider::DASHSCOPE:       result = dashscope::txt2img(prompt);      break;
         case ImageProvider::AIMLAPI:         result = aimlapi::txt2img(prompt);        break;
-        // FAL_AI has no native t2i model — fallback to local sdcpp
+        case ImageProvider::T2I_LOCAL:       result = t2i_local::txt2img(prompt);      break;
+        // FAL_AI / QWEN_LOCAL / WAVESPEED have no native t2i — fallback to local sdcpp
         default:                             result = sdcpp::txt2img(prompt);          break;
     }
     if (!disk_path.empty() && !result.empty())
@@ -1667,7 +1739,8 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
                                             const std::string& base_image_path  = "",
                                             bool bypass_cache                   = false,
                                             const std::string& session_start    = "",
-                                            const std::vector<uint8_t>& base_image_bytes = {}) {
+                                            const std::vector<uint8_t>& base_image_bytes = {},
+                                            bool apply_lora                     = false) {
     // --- Cache lookup ---
     // Skipped when bypass_cache=true (regen / refine modes from /image command).
     std::string cache_key;
@@ -1728,36 +1801,58 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
         case ImageProvider::DASHSCOPE:       result = dashscope::img2img(i2i_source, prompt);       break;
         case ImageProvider::AIMLAPI:         result = aimlapi::img2img(i2i_source, prompt);         break;
         case ImageProvider::WAVESPEED: {
-            // WaveSpeed/Qwen supports multiple images natively — send bg and NPCs
-            // as separate inputs instead of a merged collage.
-            //
-            // If the caller set an explicit base (refine/fix → last render,
-            // compose → bg-only bytes), honour it. Otherwise load bg from
-            // entries[0] so we never send the side-by-side collage.
-            bool has_explicit_base = !base_image_bytes.empty() || !base_image_path.empty();
-            std::vector<uint8_t> ws_base = i2i_source;  // already resolved above
+            if (apply_lora) {
+                // LoRA mode: model decides format (multi vs single image).
+                // For single-image models (edit-lora, flux-kontext) send the full
+                // collage so all assets are merged in one image.
+                // For multi-image models (edit-plus-lora) send bg + NPC refs (max 3 total).
+                std::string lm = img_cfg.lora_model.empty()
+                    ? "wavespeed-ai/qwen-image/edit-plus-lora"
+                    : img_cfg.lora_model;
 
-            if (!has_explicit_base && !entries.empty()) {
-                // Normal / regen: load bg directly from asset file
-                std::ifstream bf(entries[0].path, std::ios::binary);
-                std::vector<uint8_t> bg_b(std::istreambuf_iterator<char>(bf), {});
-                if (!bg_b.empty()) {
-                    ws_base = std::move(bg_b);
-                    std::cerr << "[IMG] WaveSpeed base: " << entries[0].tag << "\n";
+                std::vector<std::vector<uint8_t>> lora_refs;
+                if (wavespeed::WS_MULTI_IMAGE_LORA_MODELS.count(lm) > 0) {
+                    // Multi-image: bg as main, NPCs as extra refs (total max 3)
+                    bool has_explicit_base = !base_image_bytes.empty() || !base_image_path.empty();
+                    std::vector<uint8_t> ws_base = i2i_source;
+                    if (!has_explicit_base && !entries.empty()) {
+                        std::ifstream bf(entries[0].path, std::ios::binary);
+                        std::vector<uint8_t> bg_b(std::istreambuf_iterator<char>(bf), {});
+                        if (!bg_b.empty()) { ws_base = std::move(bg_b); }
+                    }
+                    for (size_t i = 1; i < entries.size(); ++i) {
+                        std::ifstream rf(entries[i].path, std::ios::binary);
+                        std::vector<uint8_t> rb(std::istreambuf_iterator<char>(rf), {});
+                        if (!rb.empty()) lora_refs.push_back(std::move(rb));
+                    }
+                    result = wavespeed::img2img(ws_base, prompt, lora_refs, true);
+                } else {
+                    // Single-image: send full collage (all assets merged)
+                    result = wavespeed::img2img(collage_bytes, prompt, {}, true);
                 }
-            }
-
-            // NPC portraits as extra reference images (entries[1..])
-            std::vector<std::vector<uint8_t>> npc_refs;
-            for (size_t i = 1; i < entries.size(); ++i) {
-                std::ifstream rf(entries[i].path, std::ios::binary);
-                std::vector<uint8_t> rb(std::istreambuf_iterator<char>(rf), {});
-                if (!rb.empty()) {
-                    npc_refs.push_back(std::move(rb));
-                    std::cerr << "[IMG] WaveSpeed NPC ref: " << entries[i].tag << "\n";
+            } else {
+                // Normal mode: bg as main image + NPC refs array — no LoRA
+                bool has_explicit_base = !base_image_bytes.empty() || !base_image_path.empty();
+                std::vector<uint8_t> ws_base = i2i_source;
+                if (!has_explicit_base && !entries.empty()) {
+                    std::ifstream bf(entries[0].path, std::ios::binary);
+                    std::vector<uint8_t> bg_b(std::istreambuf_iterator<char>(bf), {});
+                    if (!bg_b.empty()) {
+                        ws_base = std::move(bg_b);
+                        std::cerr << "[IMG] WaveSpeed base: " << entries[0].tag << "\n";
+                    }
                 }
+                std::vector<std::vector<uint8_t>> npc_refs;
+                for (size_t i = 1; i < entries.size(); ++i) {
+                    std::ifstream rf(entries[i].path, std::ios::binary);
+                    std::vector<uint8_t> rb(std::istreambuf_iterator<char>(rf), {});
+                    if (!rb.empty()) {
+                        npc_refs.push_back(std::move(rb));
+                        std::cerr << "[IMG] WaveSpeed NPC ref: " << entries[i].tag << "\n";
+                    }
+                }
+                result = wavespeed::img2img(ws_base, prompt, npc_refs, false);
             }
-            result = wavespeed::img2img(ws_base, prompt, npc_refs);
             break;
         }
         case ImageProvider::QWEN_LOCAL:      result = qwen_local::img2img(i2i_source, prompt);      break;
@@ -1805,6 +1900,7 @@ inline ImageProvider img_provider_from_string(const std::string& s) {
     if (s == "aimlapi")    return ImageProvider::AIMLAPI;
     if (s == "wavespeed")  return ImageProvider::WAVESPEED;
     if (s == "qwen_local") return ImageProvider::QWEN_LOCAL;
+    if (s == "t2i_local")  return ImageProvider::T2I_LOCAL;
     return ImageProvider::SDCPP_LOCAL;
 }
 
@@ -1830,8 +1926,9 @@ inline void print_image_help() {
     opt("--img-strength <f>",    "denoising strength (i2i)",       "0.75");
     opt("--img-i2i-url <url>",  "i2i server URL (if different from --img-url)",  "");
     opt("--img-i2i-key <key>",  "i2i API key (if different from --img-key)",     "");
-    opt("--img-lora <name>",    "LoRA subfolder under qwen_locale/loras/ (qwen_local only)", "");
-    opt("--img-lora-scale <f>", "LoRA weight scale for qwen_local",              "1.0");
+    opt("--img-lora <name|url>", "LoRA: subfolder name (qwen_local) or https:// URL (wavespeed + others)", "");
+    opt("--img-lora-scale <f>", "LoRA weight/scale",                             "1.0");
+    opt("--i2i-model-lora <n>", "WaveSpeed model used for /image lora (default: edit-plus-lora)",          "");
 }
 
 // =============================================================================

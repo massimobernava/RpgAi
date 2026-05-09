@@ -172,6 +172,27 @@ function get_asset_prompt(id)
 end
 ```
 
+### `get_image_style()` — scene render style
+
+Optional. Return a style string that gets injected into the i2i visual prompt for every scene render. Use it to keep the same style you already use in `get_asset_prompt()` for t2i assets:
+
+```lua
+local IMAGE_STYLE = "fantasy illustration, dramatic lighting, painterly style, 8k quality"
+
+-- t2i asset prompts already include IMAGE_STYLE (see get_asset_prompt above)
+
+-- This ensures the same style reaches i2i scene renders
+function get_image_style()
+    return IMAGE_STYLE
+end
+```
+
+The string is:
+1. Shown to the LLM that generates the visual prompt (as style guidance)
+2. Appended directly to the final prompt sent to the image model
+
+Scripts without `get_image_style()` work exactly as before.
+
 ---
 
 ## Scene cache

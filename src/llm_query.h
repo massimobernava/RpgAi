@@ -564,3 +564,239 @@ static float cosine_similarity(const std::vector<float>& a, const std::vector<fl
     float denom = std::sqrt(na) * std::sqrt(nb);
     return denom > 0 ? dot / denom : 0.0f;
 }
+
+// ===========================================================================
+// TOOL CALLING — OpenAI / OpenRouter
+//
+// Runs one complete tool-calling session. Sends messages + tools JSON to the
+// API, executes any tool_calls returned by the model via the executor callback,
+// appends tool results, and repeats until the model produces a terminal
+// response (finish_reason != "tool_calls") or max_iter is reached.
+//
+// json_schema — if non-empty, also sent as response_format so the terminal
+//               response is still structured JSON (compatible with existing
+//               process_ai_response usage).
+// ===========================================================================
+static std::string openai_tool_loop(
+        const std::string& base_url,
+        const std::string& api_key,
+        const std::string& model,
+        const std::string& system,
+        const std::vector<Message>& history,
+        const std::string& user_prompt,
+        const std::string& json_schema,
+        const std::vector<ToolDef>& tools,
+        std::function<std::string(const std::string&, const std::string&)> executor,
+        int max_iter = 8)
+{
+    // Build tools JSON array
+    json jtools = json::array();
+    for (auto& td : tools) {
+        json params;
+        try { params = json::parse(td.params_schema); }
+        catch (...) { params = {{"type","object"},{"properties",json::object()}}; }
+        jtools.push_back({{"type","function"},{"function",{
+            {"name",td.name},{"description",td.description},{"parameters",params}
+        }}});
+    }
+
+    // Build initial messages array
+    json messages = json::array();
+    if (!system.empty())
+        messages.push_back({{"role","system"},{"content",system}});
+    for (auto& m : history)
+        messages.push_back({{"role",m.role},{"content",m.content}});
+    if (!user_prompt.empty())
+        messages.push_back({{"role","user"},{"content",user_prompt}});
+
+    for (int iter = 0; iter < max_iter; ++iter) {
+        json body;
+        body["model"]    = model;
+        body["messages"] = messages;
+        body["tools"]    = jtools;
+        body["tool_choice"] = "auto";
+
+        if (!json_schema.empty()) {
+            try {
+                bool is_google = (model.rfind("google/", 0) == 0);
+                json schema = json::parse(json_schema);
+                if (is_google) strip_additional_properties(schema);
+                body["response_format"] = {{"type","json_schema"},{"json_schema",{
+                    {"name","response"},{"strict",!is_google},{"schema",schema}
+                }}};
+            } catch (...) {}
+        }
+
+        std::string readBuffer;
+        CURL* curl = curl_easy_init();
+        if (!curl) return "{\"error\":\"curl init failed\"}";
+
+        std::string jsonStr = body.dump();
+        struct curl_slist* hdrs = nullptr;
+        hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+        if (!api_key.empty()) {
+            std::string auth = "Authorization: Bearer " + api_key;
+            hdrs = curl_slist_append(hdrs, auth.c_str());
+        }
+        curl_easy_setopt(curl, CURLOPT_URL,           base_url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS,    jsonStr.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    hdrs);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &readBuffer);
+        CURLcode rc = curl_easy_perform(curl);
+        curl_slist_free_all(hdrs);
+        curl_easy_cleanup(curl);
+
+        if (rc != CURLE_OK) {
+            std::cerr << "[TOOL LOOP CURL] " << curl_easy_strerror(rc) << "\n";
+            return "{\"error\":\"curl failed\"}";
+        }
+
+        try {
+            auto jRes = json::parse(readBuffer);
+            if (jRes.contains("error")) {
+                std::cerr << "[TOOL LOOP API ERROR] " << jRes["error"].dump() << "\n";
+                return "{\"error\":\"api error\"}";
+            }
+            if (!jRes.contains("choices") || jRes["choices"].empty())
+                return "{\"error\":\"no choices\"}";
+
+            auto& choice = jRes["choices"][0];
+            auto& msg    = choice["message"];
+            std::string finish = choice.value("finish_reason", "");
+
+            // Append assistant turn for continuity
+            messages.push_back(msg);
+
+            if (finish == "tool_calls" && msg.contains("tool_calls")) {
+                for (auto& tc : msg["tool_calls"]) {
+                    std::string tc_id   = tc.value("id", "");
+                    std::string fn_name = tc["function"].value("name", "");
+                    std::string fn_args = tc["function"].value("arguments", "{}");
+                    std::cerr << "[TOOL] " << fn_name << "(" << fn_args << ")\n";
+                    std::string result  = executor(fn_name, fn_args);
+                    std::cerr << "[TOOL] → " << result << "\n";
+                    messages.push_back({
+                        {"role","tool"},{"tool_call_id",tc_id},{"content",result}
+                    });
+                }
+                // Loop: ask LLM again with tool results
+            } else {
+                // Terminal response
+                if (msg.contains("content") && !msg["content"].is_null())
+                    return msg["content"].get<std::string>();
+                return "";
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[TOOL LOOP PARSE] " << e.what() << "\n";
+            return "{\"error\":\"parse failed\"}";
+        }
+    }
+    std::cerr << "[TOOL LOOP] max iterations (" << max_iter << ") reached\n";
+    return "{\"error\":\"max tool iterations reached\"}";
+}
+
+// ===========================================================================
+// TOOL CALLING — Anthropic Claude
+//
+// Same semantics as openai_tool_loop but uses Claude's tool_use / tool_result
+// message format. json_schema is ignored here (Claude structured output and
+// tool use are mutually exclusive in the same request).
+// ===========================================================================
+static std::string claude_tool_loop(
+        const std::string& system,
+        const std::vector<Message>& history,
+        const std::string& user_prompt,
+        const std::string& model,
+        const std::vector<ToolDef>& tools,
+        std::function<std::string(const std::string&, const std::string&)> executor,
+        int max_iter = 8)
+{
+    json jtools = json::array();
+    for (auto& td : tools) {
+        json schema;
+        try { schema = json::parse(td.params_schema); }
+        catch (...) { schema = {{"type","object"},{"properties",json::object()}}; }
+        jtools.push_back({
+            {"name",td.name},{"description",td.description},{"input_schema",schema}
+        });
+    }
+
+    json messages = json::array();
+    for (auto& m : history) {
+        std::string role = (m.role == "system") ? "user" : m.role;
+        messages.push_back({{"role",role},{"content",m.content}});
+    }
+    if (!user_prompt.empty())
+        messages.push_back({{"role","user"},{"content",user_prompt}});
+
+    for (int iter = 0; iter < max_iter; ++iter) {
+        json body;
+        body["model"]      = model;
+        body["max_tokens"] = 1024;
+        body["tools"]      = jtools;
+        body["messages"]   = messages;
+        if (!system.empty()) body["system"] = system;
+
+        std::string readBuffer;
+        CURL* curl = curl_easy_init();
+        if (!curl) return "{\"error\":\"curl init\"}";
+
+        std::string jsonStr = body.dump();
+        struct curl_slist* hdrs = nullptr;
+        hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+        std::string auth = "x-api-key: " + claude_api_key;
+        hdrs = curl_slist_append(hdrs, auth.c_str());
+        hdrs = curl_slist_append(hdrs, "anthropic-version: 2023-06-01");
+
+        curl_easy_setopt(curl, CURLOPT_URL,           claude_baseUrl.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS,    jsonStr.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    hdrs);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &readBuffer);
+        CURLcode rc = curl_easy_perform(curl);
+        curl_slist_free_all(hdrs);
+        curl_easy_cleanup(curl);
+
+        if (rc != CURLE_OK) return "{\"error\":\"curl failed\"}";
+
+        try {
+            auto jRes = json::parse(readBuffer);
+            if (jRes.contains("error")) {
+                std::cerr << "[CLAUDE TOOL ERROR] " << jRes["error"].dump() << "\n";
+                return "{\"error\":\"api error\"}";
+            }
+            std::string stop_reason = jRes.value("stop_reason", "");
+            auto& content = jRes["content"];
+
+            if (stop_reason == "tool_use") {
+                messages.push_back({{"role","assistant"},{"content",content}});
+                json tool_results = json::array();
+                for (auto& block : content) {
+                    if (block.value("type","") != "tool_use") continue;
+                    std::string tool_id = block.value("id","");
+                    std::string fn_name = block.value("name","");
+                    std::string fn_args = block.contains("input") ? block["input"].dump() : "{}";
+                    std::cerr << "[TOOL] " << fn_name << "(" << fn_args << ")\n";
+                    std::string result  = executor(fn_name, fn_args);
+                    std::cerr << "[TOOL] → " << result << "\n";
+                    tool_results.push_back({
+                        {"type","tool_result"},{"tool_use_id",tool_id},{"content",result}
+                    });
+                }
+                messages.push_back({{"role","user"},{"content",tool_results}});
+            } else {
+                for (auto& block : content) {
+                    if (block.value("type","") == "text")
+                        return block.value("text","");
+                }
+                return "";
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[CLAUDE TOOL PARSE] " << e.what() << "\n";
+            return "{\"error\":\"parse failed\"}";
+        }
+    }
+    std::cerr << "[CLAUDE TOOL LOOP] max iterations reached\n";
+    return "{\"error\":\"max tool iterations reached\"}";
+}

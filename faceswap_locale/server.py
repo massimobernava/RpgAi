@@ -1,5 +1,16 @@
 """
-RpgAi Face-Swap Server
+RpgAi FaceSwap Locale Server
+
+RESPONSIBLE USE NOTICE
+----------------------
+This tool is intended exclusively for creative, fictional, and artistic purposes
+within the RpgAi game engine — replacing AI-generated NPC portraits in rendered
+game scenes. It must NOT be used to:
+  - Swap real people's faces without their explicit consent
+  - Create deceptive, defamatory, or non-consensual intimate imagery
+  - Produce content that violates applicable laws or platform policies
+
+By running this server you accept sole responsibility for the content you generate.
 
 Endpoint:
   POST /swap
@@ -14,9 +25,9 @@ Endpoint:
       enhance         — bool (default False); if True, run GFPGAN face enhancement
                         after swapping (requires gfpgan package + GFPGANv1.4 weights)
 
-    Example: /swap cristina null elena
-      C++ sends: sources=[cristina_asset, elena_asset], positions=[0, 2], enhance=false
-      Server: swaps face-slot 0 ← cristina, face-slot 2 ← elena, slot 1 untouched.
+    Example: /swap alice null bob
+      C++ sends: sources=[alice_asset, bob_asset], positions=[0, 2], enhance=false
+      Server: swaps face-slot 0 ← alice, face-slot 2 ← bob, slot 1 untouched.
 
 Returns: raw PNG bytes (Content-Type: image/png)
 

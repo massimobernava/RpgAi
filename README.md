@@ -182,6 +182,40 @@ Common agent patterns:
 
 **Performance note:** each `query_llm` call inside an agent is synchronous and blocks the Lua mutex in web mode. Keep LLM agents rare (day-boundary events, significant triggers) and prefer deterministic logic for per-turn updates.
 
+### Tool calling — LLM-driven game mechanics
+
+Tool calling lets the LLM invoke Lua functions mid-narration. Instead of having the GM invent a dice result, it calls `roll_dice` and gets a real one. Instead of guessing inventory, it calls `inventory_check`. The engine handles the back-and-forth automatically; the script just declares which tools are available.
+
+Enable tool calling by implementing the optional `get_tools()` function:
+
+```lua
+local tools = require("lib/tools")
+
+function get_tools()
+    return tools.build({
+        tools.roll_dice(state),
+        tools.skill_check(state),
+        tools.inventory_check(state),
+        tools.buy_item(state, SHOP_PRICES),
+    })
+end
+```
+
+`scripts/lib/tools.lua` ships these pre-built tools:
+
+| Tool | What it does |
+|---|---|
+| `roll_dice` | Roll N dice with S sides, return total + individual rolls |
+| `skill_check` | d20 + player skill bonus vs difficulty, flags crit/fumble |
+| `inventory_check` | How many of an item the player has |
+| `buy_item` | Atomic purchase: deducts gold or returns failure |
+| `sell_item` | Atomic sale: adds gold only if player has the item |
+| `query_state` | Expose any Lua table field to the LLM on demand |
+
+Custom tools follow the same `{ name, description, params, fn }` schema — `params` is a JSON Schema string, `fn` is a Lua function that receives a JSON args string and returns a JSON result string.
+
+Scripts without `get_tools()` work exactly as before — the engine falls back to standard single-turn LLM calls.
+
 ---
 
 ## 📚 Documentation

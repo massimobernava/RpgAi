@@ -107,6 +107,15 @@ std::string main_page = R"HTML(<!DOCTYPE html>
   .thinking { color: var(--dim); font-style: italic; animation: pulse 1.2s infinite; }
   @keyframes pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
 
+  /* ---- Suggested action buttons ---- */
+  .suggested-actions { display: flex; flex-wrap: wrap; gap: 6px;
+                        padding: 4px 0 8px 0; max-width: 820px; }
+  .btn-suggestion    { background: rgba(124,111,205,.12); border: 1px solid var(--accent);
+                        color: var(--accent); border-radius: var(--radius);
+                        padding: 5px 12px; font-size: 12px; cursor: pointer;
+                        transition: background .15s; text-align: left; }
+  .btn-suggestion:hover { background: rgba(124,111,205,.28); }
+
   /* ---- Image messages ---- */
   .msg-image { background: var(--surface); border: 1px solid var(--border);
                padding: 8px; border-radius: var(--radius); max-width: 820px; }
@@ -138,6 +147,82 @@ std::string main_page = R"HTML(<!DOCTYPE html>
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ---- Settings Modal ---- */
+  #settings-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.72);
+                      z-index: 1000; align-items: center; justify-content: center; }
+  #settings-overlay.open { display: flex; }
+  #settings-modal { background: var(--surface); border: 1px solid var(--border);
+                    border-radius: var(--radius); width: 680px; max-width: 96vw;
+                    max-height: 88vh; display: flex; flex-direction: column; overflow: hidden; }
+  #settings-header { display: flex; align-items: center; justify-content: space-between;
+                     padding: 14px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  #settings-header h3 { color: var(--accent); font-size: 14px; margin: 0; letter-spacing: .04em; }
+  #settings-close { background: none; border: none; color: var(--dim); font-size: 18px;
+                    cursor: pointer; padding: 2px 8px; border-radius: var(--radius); }
+  #settings-close:hover { color: var(--text); background: rgba(255,255,255,.05); }
+
+  .settings-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
+                   padding: 0 8px; }
+  .settings-tab  { padding: 10px 14px; font-size: 12px; font-family: var(--mono);
+                   color: var(--dim); cursor: pointer; border-bottom: 2px solid transparent;
+                   transition: all .15s; }
+  .settings-tab:hover  { color: var(--text); }
+  .settings-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .settings-body   { flex: 1; overflow-y: auto; padding: 18px; }
+  .settings-panel  { display: none; flex-direction: column; gap: 14px; }
+  .settings-panel.active { display: flex; }
+
+  .sfield { display: flex; flex-direction: column; gap: 4px; }
+  .sfield label { font-size: 11px; color: var(--dim); text-transform: uppercase;
+                  letter-spacing: .05em; }
+  .sfield input, .sfield select {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius); color: var(--text); font-family: var(--mono);
+    font-size: 13px; padding: 7px 10px; width: 100%; }
+  .sfield input:focus, .sfield select:focus { outline: none; border-color: var(--accent); }
+  .sfield input[type="number"] { width: 110px; }
+  .sfield input[type="range"]  { width: 100%; cursor: pointer; accent-color: var(--accent);
+                                  padding: 0; margin-top: 4px; }
+
+  .srow { display: flex; gap: 12px; }
+  .srow .sfield { flex: 1; min-width: 0; }
+
+  .server-card { background: var(--bg); border: 1px solid var(--border);
+                 border-radius: var(--radius); padding: 14px;
+                 display: flex; flex-direction: column; gap: 10px; }
+  .server-card h4 { font-size: 13px; color: var(--text); margin: 0; }
+  .server-status  { display: inline-flex; align-items: center; gap: 6px;
+                    font-size: 12px; color: var(--dim); }
+  .server-dot     { width: 8px; height: 8px; border-radius: 50%;
+                    background: var(--border); flex-shrink: 0; }
+  .server-dot.up   { background: var(--accent2); }
+  .server-dot.down { background: var(--danger); }
+  .server-actions  { display: flex; gap: 8px; flex-wrap: wrap; }
+  .server-actions .btn { width: auto; padding: 6px 14px; font-size: 11px; }
+
+  #settings-footer { padding: 12px 18px; border-top: 1px solid var(--border);
+                     display: flex; gap: 10px; justify-content: flex-end; flex-shrink: 0; }
+  #settings-footer .btn { width: auto; padding: 8px 22px; }
+
+  .btn-settings-sb { background: transparent; color: var(--accent);
+                     border: 1px solid var(--accent); }
+  .btn-settings-sb:hover { background: rgba(124,111,205,.12); }
+
+  /* Script list items with download button */
+  .item-list li { display: flex; align-items: center; gap: 4px; }
+  .item-list li .script-name { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                                white-space: nowrap; cursor: pointer; }
+  .script-dl-btn { flex-shrink: 0; background: none; border: none; color: var(--border);
+                   cursor: pointer; padding: 1px 4px; border-radius: 3px; font-size: 13px;
+                   line-height: 1; transition: color .15s, background .15s; }
+  .script-dl-btn:hover { color: var(--accent2); background: rgba(79,195,161,.15); }
+
+  /* Upload button */
+  .btn-upload { background: transparent; color: var(--accent2);
+                border: 1px solid var(--accent2); font-size: 11px; padding: 6px; }
+  .btn-upload:hover { background: rgba(79,195,161,.1); }
 </style>
 </head>
 <body>
@@ -154,6 +239,8 @@ std::string main_page = R"HTML(<!DOCTYPE html>
         <li class="list-empty">Loading...</li>
       </ul>
       <button id="btn-start" class="btn btn-primary" disabled>▶ Start</button>
+      <input type="file" id="script-file-input" accept=".lua" style="display:none">
+      <button id="btn-upload-script" class="btn btn-upload">⬆ Upload .lua</button>
 
       <hr class="sb-sep">
       <div class="sb-label">Load Game</div>
@@ -181,6 +268,8 @@ std::string main_page = R"HTML(<!DOCTYPE html>
         <ul id="sb-commands-list"></ul>
       </div>
     </div>
+    <hr class="sb-sep">
+    <button id="btn-settings" class="btn btn-settings-sb">⚙ Settings</button>
   </div>
 
   <!-- ===== MAIN ===== -->
@@ -193,6 +282,258 @@ std::string main_page = R"HTML(<!DOCTYPE html>
       <button id="btn-send" disabled>➤</button>
     </div>
   </div>
+
+  <!-- ===== SETTINGS MODAL ===== -->
+  <div id="settings-overlay">
+    <div id="settings-modal">
+      <div id="settings-header">
+        <h3>⚙ Settings</h3>
+        <button id="settings-close">✕</button>
+      </div>
+      <div class="settings-tabs">
+        <div class="settings-tab active" data-tab="llm">LLM</div>
+        <div class="settings-tab" data-tab="img-t2i">Image T2I</div>
+        <div class="settings-tab" data-tab="img-i2i">Image I2I</div>
+        <div class="settings-tab" data-tab="session">Session</div>
+        <div class="settings-tab" data-tab="servers">Local Servers</div>
+      </div>
+      <div class="settings-body">
+
+        <!-- TAB: LLM -->
+        <div class="settings-panel active" id="tab-llm">
+          <div class="sfield">
+            <label>Provider</label>
+            <select id="s-provider">
+              <option value="ollama">Ollama (local)</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="openai">OpenAI</option>
+              <option value="claude">Claude</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </div>
+          <div id="s-sec-ollama" class="provider-section">
+            <div class="srow">
+              <div class="sfield"><label>Model</label><input id="s-ollama-model" type="text" placeholder="dolphin3:latest"></div>
+              <div class="sfield"><label>URL</label><input id="s-ollama-url" type="text" placeholder="http://localhost:11434"></div>
+            </div>
+          </div>
+          <div id="s-sec-openrouter" class="provider-section" style="display:none">
+            <div class="srow">
+              <div class="sfield"><label>Model</label><input id="s-or-model" type="text" placeholder="qwen/qwen3-32b"></div>
+              <div class="sfield"><label>API Key</label><input id="s-or-key" type="password" placeholder="sk-or-..."></div>
+            </div>
+          </div>
+          <div id="s-sec-openai" class="provider-section" style="display:none">
+            <div class="srow">
+              <div class="sfield"><label>Model</label><input id="s-oai-model" type="text" placeholder="gpt-4o-mini"></div>
+              <div class="sfield"><label>API Key</label><input id="s-oai-key" type="password" placeholder="sk-..."></div>
+            </div>
+            <div class="sfield"><label>URL (optional override)</label><input id="s-oai-url" type="text"></div>
+          </div>
+          <div id="s-sec-claude" class="provider-section" style="display:none">
+            <div class="srow">
+              <div class="sfield"><label>Model</label><input id="s-claude-model" type="text" placeholder="claude-haiku-4-5-20251001"></div>
+              <div class="sfield"><label>API Key</label><input id="s-claude-key" type="password" placeholder="sk-ant-..."></div>
+            </div>
+          </div>
+          <div id="s-sec-gemini" class="provider-section" style="display:none">
+            <div class="srow">
+              <div class="sfield"><label>Model</label><input id="s-g-model" type="text" placeholder="gemini-flash-latest"></div>
+              <div class="sfield"><label>API Key</label><input id="s-g-key" type="password"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB: Image T2I -->
+        <div class="settings-panel" id="tab-img-t2i">
+          <div class="srow">
+            <div class="sfield">
+              <label>Provider (empty = disabled)</label>
+              <select id="s-img-provider">
+                <option value="">Disabled</option>
+                <option value="sdcpp_local">stable-diffusion.cpp (local)</option>
+                <option value="openai">OpenAI</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="fal">fal.ai</option>
+                <option value="wavespeed">WaveSpeed</option>
+                <option value="dashscope">DashScope</option>
+                <option value="aimlapi">AIMLAPI</option>
+              </select>
+            </div>
+            <div class="sfield"><label>URL</label><input id="s-img-url" type="text" placeholder="http://localhost:7860"></div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>API Key</label><input id="s-img-key" type="password"></div>
+            <div class="sfield"><label>T2I Model</label><input id="s-img-t2i-model" type="text" placeholder="blank = provider default"></div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>Width</label><input id="s-img-width" type="number" min="256" max="2048" step="64"></div>
+            <div class="sfield"><label>Height</label><input id="s-img-height" type="number" min="256" max="2048" step="64"></div>
+            <div class="sfield"><label>Steps</label><input id="s-img-steps" type="number" min="1" max="150"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Image I2I -->
+        <div class="settings-panel" id="tab-img-i2i">
+          <div class="srow">
+            <div class="sfield">
+              <label>I2I Provider <small style="color:var(--muted)">(blank = same as T2I)</small></label>
+              <select id="s-img-i2i-provider">
+                <option value="">Same as T2I</option>
+                <option value="sdcpp_local">stable-diffusion.cpp (local)</option>
+                <option value="openai">OpenAI</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="fal">fal.ai</option>
+                <option value="wavespeed">WaveSpeed</option>
+                <option value="dashscope">DashScope</option>
+                <option value="aimlapi">AIMLAPI</option>
+                <option value="qwen_local">Qwen Local</option>
+              </select>
+            </div>
+            <div class="sfield"><label>I2I Model <span id="s-img-i2i-hint" style="color:var(--accent2);font-size:10px"></span></label><input id="s-img-i2i-model" type="text" placeholder="blank = provider default"></div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>I2I URL</label><input id="s-img-i2i-url" type="text"></div>
+            <div class="sfield"><label>I2I Key</label><input id="s-img-i2i-key" type="password"></div>
+          </div>
+          <div class="sfield">
+            <label>Strength: <span id="s-img-strength-val">0.75</span></label>
+            <input id="s-img-strength" type="range" min="0" max="1" step="0.01" value="0.75">
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>LoRA (local name or https:// URL)</label><input id="s-img-lora" type="text" placeholder="subfolder name or CivitAI URL"></div>
+            <div class="sfield">
+              <label>LoRA Scale: <span id="s-img-lora-scale-val">1.00</span></label>
+              <input id="s-img-lora-scale" type="range" min="0" max="2" step="0.05" value="1">
+            </div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>LoRA Model <small style="color:var(--muted)">(/image lora — blank = provider default)</small></label><input id="s-img-lora-model" type="text"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Session -->
+        <div class="settings-panel" id="tab-session">
+          <div class="srow">
+            <div class="sfield"><label>Max History</label><input id="s-max-history" type="number" min="1" max="200"></div>
+            <div class="sfield"><label>Max Retries</label><input id="s-max-retries" type="number" min="1" max="20"></div>
+          </div>
+          <div class="sfield">
+            <label>Scripts Path (base_path)</label>
+            <input id="s-base-path" type="text" placeholder="./scripts/">
+          </div>
+          <div class="srow">
+            <div class="sfield">
+              <label>Save Mode</label>
+              <select id="s-save-mode">
+                <option value="last">last (overwrite)</option>
+                <option value="full">full (append)</option>
+              </select>
+            </div>
+            <div class="sfield"><label>Save Path</label><input id="s-save-path" type="text" placeholder="saves/"></div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>RAG File</label><input id="s-rag-file" type="text"></div>
+            <div class="sfield"><label>RAG Examples</label><input id="s-rag-examples" type="number" min="1" max="20"></div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>Embed Provider</label><input id="s-embed-provider" type="text" placeholder="ollama / openai"></div>
+            <div class="sfield"><label>Embed Model</label><input id="s-embed-model" type="text" placeholder="nomic-embed-text"></div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>Embed URL</label><input id="s-embed-url" type="text"></div>
+            <div class="sfield"><label>Embed Key</label><input id="s-embed-key" type="password"></div>
+          </div>
+          <div class="sfield" style="max-width:200px">
+            <label>Language Code</label>
+            <input id="s-lang-code" type="text" placeholder="it / en / fr">
+          </div>
+        </div>
+
+        <!-- TAB: Local Servers -->
+        <div class="settings-panel" id="tab-servers">
+
+          <!-- Python environment selector (shared by all local servers) -->
+          <div class="server-card">
+            <h4>Python Environment</h4>
+            <div class="sfield">
+              <label>Type</label>
+              <select id="s-py-env-type" onchange="onPyEnvChange()">
+                <option value="system">System (python3 / pip3)</option>
+                <option value="venv">venv</option>
+                <option value="conda">conda</option>
+                <option value="uv">uv</option>
+              </select>
+            </div>
+            <div class="sfield" id="py-env-path-row" style="display:none">
+              <label id="py-env-path-label">Path / Env name</label>
+              <input id="s-py-env-path" type="text" placeholder="">
+            </div>
+          </div>
+
+          <div class="server-card">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <h4>FaceSwap Locale Server <small style="font-size:10px;color:var(--dim)">port 8001</small></h4>
+              <span class="server-status">
+                <span id="dot-faceswap" class="server-dot"></span>
+                <span id="label-faceswap">—</span>
+              </span>
+            </div>
+            <div class="sfield">
+              <label>URL override (saved as faceswap_url)</label>
+              <input id="s-faceswap-url" type="text" placeholder="http://localhost:8001">
+            </div>
+            <div class="server-actions">
+              <button class="btn btn-secondary" onclick="serverAction('faceswap_locale','install')">⬇ Install deps</button>
+              <button class="btn btn-primary"   onclick="serverAction('faceswap_locale','start')">▶ Start</button>
+              <button class="btn btn-ghost"     onclick="serverAction('faceswap_locale','stop')">■ Stop</button>
+            </div>
+          </div>
+          <div class="server-card">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <h4>Qwen Locale Server <small style="font-size:10px;color:var(--dim)">port 8002</small></h4>
+              <span class="server-status">
+                <span id="dot-qwen" class="server-dot"></span>
+                <span id="label-qwen">—</span>
+              </span>
+            </div>
+            <div class="server-actions">
+              <button class="btn btn-secondary" onclick="serverAction('qwen_locale','install')">⬇ Install deps</button>
+              <button class="btn btn-primary"   onclick="serverAction('qwen_locale','start')">▶ Start</button>
+              <button class="btn btn-ghost"     onclick="serverAction('qwen_locale','stop')">■ Stop</button>
+            </div>
+          </div>
+          <div class="server-card">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <h4>T2I Locale Server <small style="font-size:10px;color:var(--dim)">port 8003</small></h4>
+              <span class="server-status">
+                <span id="dot-t2i" class="server-dot"></span>
+                <span id="label-t2i">—</span>
+              </span>
+            </div>
+            <div class="sfield" id="t2i-model-row" style="display:none">
+              <label>Model</label>
+              <select id="s-t2i-model" onchange="onT2iModelChange()">
+                <option value="">(auto)</option>
+              </select>
+              <button class="btn btn-ghost" style="margin-left:6px;padding:2px 8px;font-size:11px" onclick="fetchT2iModels()">↻</button>
+            </div>
+            <div class="server-actions">
+              <button class="btn btn-secondary" onclick="serverAction('t2i_locale','install')">⬇ Install deps</button>
+              <button class="btn btn-primary"   onclick="serverAction('t2i_locale','start')">▶ Start</button>
+              <button class="btn btn-ghost"     onclick="serverAction('t2i_locale','stop')">■ Stop</button>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /settings-body -->
+      <div id="settings-footer">
+        <button class="btn btn-ghost" onclick="closeSettings()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+      </div>
+    </div><!-- /settings-modal -->
+  </div><!-- /settings-overlay -->
+
 </div>
 
 <script>
@@ -695,16 +1036,19 @@ async function sendInput() {
     endpoint  = '/api/show_asset?id=' + encodeURIComponent(id);
     fetchOpts = { method: 'GET' };
   } else if (text.startsWith('/image')) {
-    const partial = text.includes('--partial');
-    const parts   = text.trim().split(/\s+/);
-    const modeArg = (parts.length > 1 && !parts[1].startsWith('--')) ? parts[1] : '';
-    const mode    = ['regen', 'refine', 'fix', 'compose'].includes(modeArg) ? modeArg : '';
-    const instruction = (mode === 'fix' && parts.length > 2) ? parts.slice(2).join(' ') : '';
+    const partial  = text.includes('--partial');
+    const parts    = text.trim().split(/\s+/).filter(p => p !== '--partial');
+    // "lora" can appear anywhere after /image: /image lora, /image lora regen, /image regen lora
+    const lora     = parts.slice(1).includes('lora');
+    const modeParts = parts.slice(1).filter(p => p !== 'lora');
+    const modeArg  = modeParts.length > 0 ? modeParts[0] : '';
+    const mode     = ['regen', 'refine', 'fix', 'compose'].includes(modeArg) ? modeArg : '';
+    const instruction = (mode === 'fix' && modeParts.length > 1) ? modeParts.slice(1).join(' ') : '';
     endpoint  = '/api/image';
     fetchOpts = {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ partial, mode, instruction })
+      body:    JSON.stringify({ partial, lora, mode, instruction })
     };
   } else if (text.startsWith('/swap')) {
     endpoint  = '/api/swap';
@@ -767,6 +1111,8 @@ async function sendInput() {
       addMsg('msg-narration', data.narration || '');
       if (data.display) hud.textContent = data.display;
       if (data.game_over) { handleGameOver(data.game_over_reason); return; }
+      // Suggested action buttons (optional — only if script provides them)
+      showSuggestions(data.suggested_actions);
     }
   } catch (e) {
     thinking.remove();
@@ -775,6 +1121,29 @@ async function sendInput() {
 
   setInputEnabled(true);
   inp.focus();
+}
+
+function showSuggestions(actions) {
+  // Remove previous suggestion row if present
+  const old = document.querySelector('.suggested-actions');
+  if (old) old.remove();
+  if (!actions || !actions.length) return;
+  const row = document.createElement('div');
+  row.className = 'suggested-actions';
+  actions.forEach(action => {
+    const btn = document.createElement('button');
+    btn.className = 'btn-suggestion';
+    btn.textContent = action;
+    btn.onclick = () => {
+      inp.value = action;
+      row.remove();
+      sendChat();
+    };
+    row.appendChild(btn);
+  });
+  const logEl = document.getElementById('log');
+  logEl.appendChild(row);
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
 function handleGameOver(reason) {
@@ -841,9 +1210,18 @@ async function initWithRetry() {
         return;
       }
       data.scripts.forEach(s => {
-        const li       = document.createElement('li');
-        li.textContent = s;
-        li.onclick     = () => {
+        const li    = document.createElement('li');
+        const name  = document.createElement('span');
+        name.className   = 'script-name';
+        name.textContent = s;
+        const dlBtn = document.createElement('button');
+        dlBtn.className   = 'script-dl-btn';
+        dlBtn.textContent = '⬇';
+        dlBtn.title       = 'Download ' + s;
+        dlBtn.onclick = e => { e.stopPropagation(); downloadScript(s); };
+        li.appendChild(name);
+        li.appendChild(dlBtn);
+        li.onclick = () => {
           scriptList.querySelectorAll('li').forEach(x => x.classList.remove('active-script'));
           li.classList.add('active-script');
           selectedScript    = s;
@@ -894,6 +1272,339 @@ async function initWithRetry() {
 }
 
 initWithRetry();
+
+/* ================================================================
+   Script upload / download
+   ================================================================ */
+function downloadScript(name) {
+  const a = document.createElement('a');
+  a.href     = '/api/scripts/download?name=' + encodeURIComponent(name);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+const scriptFileInput   = document.getElementById('script-file-input');
+const btnUploadScript   = document.getElementById('btn-upload-script');
+
+btnUploadScript.addEventListener('click', () => scriptFileInput.click());
+
+scriptFileInput.addEventListener('change', async () => {
+  const file = scriptFileInput.files[0];
+  if (!file) return;
+  scriptFileInput.value = '';
+  const text = await file.text();
+  try {
+    const r = await fetch('/api/scripts/upload', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ name: file.name, content: text })
+    });
+    const d = await r.json();
+    if (d.success) {
+      addMsg('msg-system', '⬆ Uploaded: ' + file.name);
+      initWithRetry();  // refresh script list
+    } else {
+      addMsg('msg-error', 'Upload failed: ' + (d.error || 'unknown'));
+    }
+  } catch (e) {
+    addMsg('msg-error', 'Upload error: ' + e.message);
+  }
+});
+
+/* ================================================================
+   Settings
+   ================================================================ */
+const btnSettings     = document.getElementById('btn-settings');
+const settingsOverlay = document.getElementById('settings-overlay');
+
+function openSettings() {
+  loadSettings();
+  settingsOverlay.classList.add('open');
+  if (document.querySelector('.settings-tab[data-tab="servers"].active'))
+    refreshServerStatus();
+}
+function closeSettings() { settingsOverlay.classList.remove('open'); }
+
+btnSettings.addEventListener('click', openSettings);
+document.getElementById('settings-close').addEventListener('click', closeSettings);
+settingsOverlay.addEventListener('click', e => { if (e.target === settingsOverlay) closeSettings(); });
+
+document.querySelectorAll('.settings-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.settings-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'servers') refreshServerStatus();
+  });
+});
+
+document.getElementById('s-provider').addEventListener('change', function() {
+  document.querySelectorAll('.provider-section').forEach(s => s.style.display = 'none');
+  const sec = document.getElementById('s-sec-' + this.value);
+  if (sec) sec.style.display = '';
+});
+
+const I2I_DEFAULTS = {
+  wavespeed:    'wavespeed-ai/qwen-image/edit-2511',
+  fal:          'fal-ai/qwen-image-edit-2511',
+  dashscope:    'qwen-image-edit-plus',
+  aimlapi:      'alibaba/qwen-image-edit',
+  openai:       'gpt-image-1',
+  sdcpp_local:  '(i2i built-in)',
+  qwen_local:   '(local server)',
+};
+
+const LORA_MODEL_DEFAULTS = {
+  wavespeed: 'wavespeed-ai/qwen-image/edit-plus-lora',
+};
+
+function effectiveI2iProvider() {
+  const i2i = document.getElementById('s-img-i2i-provider').value;
+  return i2i || document.getElementById('s-img-provider').value;
+}
+
+function updateI2iHints() {
+  const prov = effectiveI2iProvider();
+  const hint = document.getElementById('s-img-i2i-hint');
+  const def  = I2I_DEFAULTS[prov];
+  if (hint) hint.textContent = def ? '— default: ' + def : '';
+  const loraModel = document.getElementById('s-img-lora-model');
+  if (loraModel) loraModel.placeholder = LORA_MODEL_DEFAULTS[prov] || '';
+}
+
+document.getElementById('s-img-provider').addEventListener('change', updateI2iHints);
+document.getElementById('s-img-i2i-provider').addEventListener('change', updateI2iHints);
+
+['s-img-strength','s-img-lora-scale'].forEach(id => {
+  const el = document.getElementById(id);
+  const vl = document.getElementById(id + '-val');
+  if (el && vl) el.addEventListener('input', () => { vl.textContent = parseFloat(el.value).toFixed(2); });
+});
+
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    const d = await r.json();
+    if (!d.success) return;
+
+    const prov = d.provider || 'ollama';
+    document.getElementById('s-provider').value = prov;
+    document.querySelectorAll('.provider-section').forEach(s => s.style.display = 'none');
+    const sec = document.getElementById('s-sec-' + prov);
+    if (sec) sec.style.display = '';
+
+    const sv = (id, val) => { const el = document.getElementById(id); if (el) el.value = val ?? ''; };
+    sv('s-ollama-model',     d.ollama_model);
+    sv('s-ollama-url',       d.ollama_url);
+    sv('s-or-model',         d.openrouter_model);
+    sv('s-or-key',           d.openrouter_key);
+    sv('s-oai-model',        d.openai_model);
+    sv('s-oai-key',          d.openai_key);
+    sv('s-oai-url',          d.openai_url);
+    sv('s-claude-model',     d.claude_model);
+    sv('s-claude-key',       d.claude_key);
+    sv('s-g-model',          d.gemini_model);
+    sv('s-g-key',            d.gemini_key);
+
+    const imgPv = d.img_enabled ? (d.img_provider || '') : '';
+    sv('s-img-provider',     imgPv);
+    sv('s-img-url',          d.img_url);
+    sv('s-img-key',          d.img_key);
+    sv('s-img-t2i-model',    d.img_t2i_model);
+    sv('s-img-i2i-provider', d.img_i2i_provider);
+    sv('s-img-i2i-model',    d.img_i2i_model);
+    sv('s-img-i2i-url',      d.img_i2i_url);
+    sv('s-img-i2i-key',      d.img_i2i_key);
+    updateI2iHints();
+    sv('s-img-width',        d.img_width  || 1024);
+    sv('s-img-height',       d.img_height || 1024);
+    sv('s-img-steps',        d.img_steps  || 28);
+    const str = d.img_strength ?? 0.75;
+    sv('s-img-strength', str);
+    document.getElementById('s-img-strength-val').textContent = parseFloat(str).toFixed(2);
+    sv('s-img-lora', d.img_lora);
+    sv('s-img-lora-model', d.img_lora_model);
+    const ls = d.img_lora_scale ?? 1.0;
+    sv('s-img-lora-scale', ls);
+    document.getElementById('s-img-lora-scale-val').textContent = parseFloat(ls).toFixed(2);
+
+    sv('s-base-path',      d.base_path);
+    sv('s-max-history',    d.max_history  || 30);
+    sv('s-max-retries',    d.max_retries  || 3);
+    sv('s-save-mode',      d.save_mode    || 'last');
+    sv('s-save-path',      d.save_path);
+    sv('s-rag-file',       d.rag_file);
+    sv('s-rag-examples',   d.rag_examples || 3);
+    sv('s-embed-provider', d.embed_provider);
+    sv('s-embed-model',    d.embed_model);
+    sv('s-embed-url',      d.embed_url);
+    sv('s-embed-key',      d.embed_key);
+    sv('s-lang-code',      d.lang_code);
+
+    sv('s-faceswap-url', d.faceswap_url);
+    sv('s-py-env-type',  d.py_env_type || 'system');
+    sv('s-py-env-path',  d.py_env_path || '');
+    onPyEnvChange();
+
+    // Pre-select t2i model from saved setting (models fetched when server is up)
+    if (d.img_t2i_model) {
+      const sel = document.getElementById('s-t2i-model');
+      let found = false;
+      for (const opt of sel.options) {
+        if (opt.value === d.img_t2i_model) { opt.selected = true; found = true; break; }
+      }
+      if (!found) {
+        const opt = document.createElement('option');
+        opt.value = d.img_t2i_model; opt.textContent = d.img_t2i_model; opt.selected = true;
+        sel.appendChild(opt);
+      }
+    }
+  } catch (e) { console.error('[settings] load error:', e); }
+}
+
+function onPyEnvChange() {
+  const t    = (document.getElementById('s-py-env-type') || {}).value || 'system';
+  const row  = document.getElementById('py-env-path-row');
+  const lbl  = document.getElementById('py-env-path-label');
+  const inp  = document.getElementById('s-py-env-path');
+  if (!row) return;
+  if (t === 'venv') {
+    row.style.display = '';
+    lbl.textContent   = 'venv directory path';
+    inp.placeholder   = '/home/user/.venvs/rpgai';
+  } else if (t === 'conda') {
+    row.style.display = '';
+    lbl.textContent   = 'Conda environment name';
+    inp.placeholder   = 'rpgai';
+  } else {
+    row.style.display = 'none';
+  }
+}
+
+async function saveSettings() {
+  const gv = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  const imgProv = gv('s-img-provider');
+  const payload = {
+    provider:         gv('s-provider'),
+    ollama_model:     gv('s-ollama-model'),
+    ollama_url:       gv('s-ollama-url'),
+    openrouter_model: gv('s-or-model'),
+    openrouter_key:   gv('s-or-key'),
+    openai_model:     gv('s-oai-model'),
+    openai_key:       gv('s-oai-key'),
+    openai_url:       gv('s-oai-url'),
+    claude_model:     gv('s-claude-model'),
+    claude_key:       gv('s-claude-key'),
+    gemini_model:     gv('s-g-model'),
+    gemini_key:       gv('s-g-key'),
+    img_enabled:      imgProv !== '',
+    img_provider:     imgProv,
+    img_url:          gv('s-img-url'),
+    img_key:          gv('s-img-key'),
+    img_t2i_model:    gv('s-img-t2i-model'),
+    img_i2i_model:    gv('s-img-i2i-model'),
+    img_i2i_provider: gv('s-img-i2i-provider'),
+    img_i2i_url:      gv('s-img-i2i-url'),
+    img_i2i_key:      gv('s-img-i2i-key'),
+    img_width:        parseInt(gv('s-img-width'))  || 1024,
+    img_height:       parseInt(gv('s-img-height')) || 1024,
+    img_steps:        parseInt(gv('s-img-steps'))  || 28,
+    img_strength:     parseFloat(gv('s-img-strength')) || 0.75,
+    img_lora:         gv('s-img-lora'),
+    img_lora_scale:   parseFloat(gv('s-img-lora-scale')) || 1.0,
+    img_lora_model:   gv('s-img-lora-model'),
+    faceswap_url:     gv('s-faceswap-url'),
+    py_env_type:      gv('s-py-env-type'),
+    py_env_path:      gv('s-py-env-path'),
+    base_path:        gv('s-base-path'),
+    max_history:      parseInt(gv('s-max-history'))  || 30,
+    max_retries:      parseInt(gv('s-max-retries'))  || 3,
+    save_mode:        gv('s-save-mode'),
+    save_path:        gv('s-save-path'),
+    rag_file:         gv('s-rag-file'),
+    rag_examples:     parseInt(gv('s-rag-examples')) || 3,
+    embed_provider:   gv('s-embed-provider'),
+    embed_model:      gv('s-embed-model'),
+    embed_url:        gv('s-embed-url'),
+    embed_key:        gv('s-embed-key'),
+    lang_code:        gv('s-lang-code')
+  };
+  try {
+    const r = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if (d.success) { closeSettings(); addMsg('msg-system', '⚙ Settings saved.'); }
+    else addMsg('msg-error', 'Settings error: ' + (d.error || 'unknown'));
+  } catch (e) { addMsg('msg-error', 'Settings save failed: ' + e.message); }
+}
+
+async function refreshServerStatus() {
+  try {
+    const r = await fetch('/api/servers/status');
+    const d = await r.json();
+    const set = (dotId, lblId, up) => {
+      const dot = document.getElementById(dotId), lbl = document.getElementById(lblId);
+      if (!dot || !lbl) return;
+      dot.className  = 'server-dot ' + (up ? 'up' : 'down');
+      lbl.textContent = up ? 'Running' : 'Offline';
+    };
+    set('dot-faceswap','label-faceswap', d.faceswap_locale);
+    set('dot-qwen',    'label-qwen',     d.qwen_locale);
+    set('dot-t2i',     'label-t2i',      d.t2i_locale);
+    if (d.t2i_locale) fetchT2iModels();
+    document.getElementById('t2i-model-row').style.display = d.t2i_locale ? '' : 'none';
+  } catch (_) {}
+}
+
+async function fetchT2iModels() {
+  try {
+    const r = await fetch('/api/servers/models/t2i_locale');
+    const d = await r.json();
+    if (!d.success) return;
+    const sel = document.getElementById('s-t2i-model');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">(auto)</option>';
+    (d.models || []).forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m; opt.textContent = m;
+      if (m === current || m === d.loaded) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    // If nothing selected and loaded model known, pick it
+    if (!sel.value && d.loaded) sel.value = d.loaded;
+  } catch (_) {}
+}
+
+function onT2iModelChange() {
+  const model = document.getElementById('s-t2i-model').value;
+  // Keep text input in sync so saveSettings() picks up the same value
+  const textInput = document.getElementById('s-img-t2i-model');
+  if (textInput) textInput.value = model;
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ img_t2i_model: model })
+  }).catch(() => {});
+}
+
+async function serverAction(server, action) {
+  try {
+    const r = await fetch('/api/servers/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server, action })
+    });
+    const d = await r.json();
+    addMsg('msg-system', '⚙ ' + (d.message || d.error || action));
+    setTimeout(refreshServerStatus, 2500);
+  } catch (e) { addMsg('msg-error', 'Server action failed: ' + e.message); }
+}
 </script>
 </body>
 </html>)HTML";

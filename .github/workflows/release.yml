@@ -1,0 +1,127 @@
+name: Build Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.0)'
+        required: true
+        default: 'v0.1.0'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            binary: rpgai
+          - os: macos-latest
+            name: macos
+            binary: rpgai
+          - os: windows-latest
+            name: windows
+            binary: rpgai.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Linux ──────────────────────────────────────────────────────────────
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libluajit-5.1-dev \
+            libcurl4-openssl-dev \
+            libasio-dev
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(nproc)
+
+      # ── macOS ──────────────────────────────────────────────────────────────
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install luajit curl asio
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(sysctl -n hw.ncpu)
+
+      # ── Windows (MSYS2 / MinGW64) ──────────────────────────────────────────
+      - name: Setup MSYS2 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-luajit
+            mingw-w64-x86_64-curl-winssl
+            mingw-w64-x86_64-asio
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(nproc)
+
+      # ── Upload artifact ────────────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpgai-${{ matrix.name }}
+          path: build/${{ matrix.binary }}
+
+  # ── Create draft release with all three binaries ──────────────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect binaries
+        run: |
+          cp artifacts/rpgai-linux/rpgai        rpgai-linux
+          cp artifacts/rpgai-macos/rpgai        rpgai-macos
+          cp artifacts/rpgai-windows/rpgai.exe  rpgai-windows.exe
+          chmod +x rpgai-linux rpgai-macos
+
+      - name: Create tag and draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$VERSION" HEAD
+          git push origin "$VERSION"
+          gh release create "$VERSION" \
+            --title "RpgAi $VERSION" \
+            --draft \
+            --generate-notes \
+            rpgai-linux \
+            rpgai-macos \
+            rpgai-windows.exe
