@@ -58,3 +58,5 @@ pipeline_stages/
 
 # Native pipeline (WIP — not ready for public release)
 pipeline_native/
+installer/macos/RpgAi.app/
+installer/macos/app-template/
