@@ -233,56 +233,20 @@ jobs:
         shell: powershell
         run: |
           if (-not (Test-Path "installer\rpgai-1024.png")) {
-            Write-Host "No icon found — skipping .ico generation"
+            Write-Host "No icon found - skipping .ico generation"
             exit 0
           }
-          # Use .NET to create multi-size .ico from PNG
-          Add-Type -AssemblyName System.Drawing
-          $src = [System.Drawing.Image]::FromFile((Resolve-Path "installer\rpgai-1024.png"))
-          $sizes = @(16, 32, 48, 64, 128, 256)
-          $ms = New-Object System.IO.MemoryStream
-
-          # ICO header
-          $writer = New-Object System.IO.BinaryWriter($ms)
-          $writer.Write([uint16]0)      # reserved
-          $writer.Write([uint16]1)      # type: ICO
-          $writer.Write([uint16]$sizes.Count)
-
-          $imgStreams = @()
-          foreach ($sz in $sizes) {
-            $bmp = New-Object System.Drawing.Bitmap($sz, $sz)
-            $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-            $g.DrawImage($src, 0, 0, $sz, $sz)
-            $g.Dispose()
-            $imgMs = New-Object System.IO.MemoryStream
-            $bmp.Save($imgMs, [System.Drawing.Imaging.ImageFormat]::Png)
-            $imgStreams += $imgMs
-            $bmp.Dispose()
-          }
-
-          # Directory entries (offset starts after header + directory)
-          $dirEntrySize = 16
-          $dataOffset = 6 + $dirEntrySize * $sizes.Count
-          foreach ($imgMs in $imgStreams) {
-            $bytes = $imgMs.ToArray()
-            $sz = if ($bytes.Length -gt 0) { [int]([Math]::Sqrt(($imgMs.Length - 8) / 4)) } else { 0 }
-            $writer.Write([byte]0)   # width (0=256)
-            $writer.Write([byte]0)   # height
-            $writer.Write([byte]0)   # color count
-            $writer.Write([byte]0)   # reserved
-            $writer.Write([uint16]1) # color planes
-            $writer.Write([uint16]32)# bpp
-            $writer.Write([uint32]$imgMs.ToArray().Length)
-            $writer.Write([uint32]$dataOffset)
-            $dataOffset += $imgMs.ToArray().Length
-          }
-          foreach ($imgMs in $imgStreams) {
-            $writer.Write($imgMs.ToArray())
-          }
-
-          [System.IO.File]::WriteAllBytes("installer\windows\rpgai.ico", $ms.ToArray())
-          Write-Host "rpgai.ico generated"
+          pip install pillow --quiet
+          $py = @'
+from PIL import Image
+img = Image.open("installer/rpgai-1024.png").convert("RGBA")
+sizes = [(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)]
+imgs = [img.resize(s, Image.LANCZOS) for s in sizes]
+imgs[0].save("installer/windows/rpgai.ico", format="ICO", sizes=sizes, append_images=imgs[1:])
+print("rpgai.ico generated")
+'@
+          $py | Out-File -FilePath gen_ico.py -Encoding utf8
+          python gen_ico.py
 
       - name: Install NSIS (Windows)
         if: runner.os == 'Windows'
