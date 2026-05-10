@@ -189,6 +189,7 @@ jobs:
 
           pkgbuild \
             --root pkg_payload \
+            --install-location / \
             --scripts installer/macos/scripts \
             --identifier com.rpgai.app \
             --version "$VERSION_NUM" \
