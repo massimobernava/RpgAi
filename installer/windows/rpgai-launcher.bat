@@ -23,8 +23,7 @@ cd /d "%WORKSPACE%"
 start "" "%INSTDIR%rpgai.exe" ^
     --web ^
     --path "%WORKSPACE%\scripts\" ^
-    --save-path "%WORKSPACE%\saves\" ^
-    --port %PORT%
+    --save-path "%WORKSPACE%\saves\"
 
 :: Wait for server ready (poll up to 15 s)
 set /a TRIES=0

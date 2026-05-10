@@ -28,8 +28,7 @@ cd "$WORKSPACE"
 "$BINARY" \
     --web \
     --path "$WORKSPACE/scripts/" \
-    --save-path "$WORKSPACE/saves/" \
-    --port $PORT &
+    --save-path "$WORKSPACE/saves/" &
 
 RPGAI_PID=$!
 
