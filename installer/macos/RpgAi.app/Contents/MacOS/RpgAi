@@ -1,0 +1,49 @@
+#!/bin/bash
+# RpgAi launcher — starts the engine in web mode and opens the browser.
+# Provider and API keys are configured in the web UI (Settings panel).
+# Settings persist to ~/Documents/RpgAi/rpgai_settings.json automatically.
+
+BINARY="/usr/local/bin/rpgai"
+WORKSPACE="$HOME/Documents/RpgAi"
+GETTING_STARTED="/usr/local/share/rpgai/getting_started.html"
+PORT=8080
+
+# ── Sanity check ──────────────────────────────────────────────────────────────
+if [ ! -f "$BINARY" ]; then
+    osascript -e 'display alert "RpgAi" message "Binary not found at /usr/local/bin/rpgai.\nPlease reinstall RpgAi." as critical'
+    exit 1
+fi
+
+# ── Ensure workspace directories exist ───────────────────────────────────────
+mkdir -p "$WORKSPACE/scripts" "$WORKSPACE/saves"
+
+# ── Copy default scripts on first run ────────────────────────────────────────
+SRC="/usr/local/share/rpgai"
+if [ ! -f "$WORKSPACE/scripts/fantasy_demo.lua" ]; then
+    cp -rn "$SRC/scripts/." "$WORKSPACE/scripts/" 2>/dev/null || true
+fi
+
+# ── Launch engine (CWD = workspace so rpgai_settings.json is found) ──────────
+cd "$WORKSPACE"
+"$BINARY" \
+    --web \
+    --path "$WORKSPACE/scripts/" \
+    --save-path "$WORKSPACE/saves/" \
+    --port $PORT &
+
+RPGAI_PID=$!
+
+# ── Wait for server ready (max 15 s) ─────────────────────────────────────────
+for i in $(seq 1 15); do
+    sleep 1
+    curl -sf "http://localhost:$PORT/" > /dev/null 2>&1 && break
+done
+
+# ── Open browser (getting started page on first run) ─────────────────────────
+if [ ! -f "$WORKSPACE/rpgai_settings.json" ] && [ -f "$GETTING_STARTED" ]; then
+    open "$GETTING_STARTED"
+fi
+open "http://localhost:$PORT"
+
+# ── Keep .app alive until engine exits ───────────────────────────────────────
+wait $RPGAI_PID

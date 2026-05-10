@@ -33,9 +33,11 @@ RequestExecutionLevel admin
 Section "RpgAi" SecMain
     SectionIn RO
 
-    ; Install executable
+    ; Install executable and launcher
     SetOutPath "$INSTDIR"
     File "rpgai.exe"
+    File "rpgai-launcher.bat"
+    File "getting_started.html"
 
     ; Bundle scripts and servers inside install dir (read-only reference copy)
     SetOutPath "$INSTDIR\scripts"
@@ -72,13 +74,13 @@ Section "RpgAi" SecMain
 
     ; Start Menu shortcut
     CreateDirectory "$SMPROGRAMS\RpgAi"
-    CreateShortcut "$SMPROGRAMS\RpgAi\RpgAi.lnk" "$INSTDIR\rpgai.exe" \
+    CreateShortcut "$SMPROGRAMS\RpgAi\RpgAi.lnk" "$INSTDIR\rpgai-launcher.bat" \
         "" "$INSTDIR\rpgai.exe" 0
     CreateShortcut "$SMPROGRAMS\RpgAi\Workspace.lnk" "$DOCUMENTS\RpgAi"
     CreateShortcut "$SMPROGRAMS\RpgAi\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
 
     ; Desktop shortcut
-    CreateShortcut "$DESKTOP\RpgAi.lnk" "$INSTDIR\rpgai.exe" \
+    CreateShortcut "$DESKTOP\RpgAi.lnk" "$INSTDIR\rpgai-launcher.bat" \
         "" "$INSTDIR\rpgai.exe" 0
 
     ; Registry (for Add/Remove Programs)
@@ -88,7 +90,7 @@ Section "RpgAi" SecMain
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\RpgAi" \
         "UninstallString" '"$INSTDIR\Uninstall.exe"'
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\RpgAi" \
-        "DisplayVersion" "1.0.0"
+        "DisplayVersion" "RPGAI_VERSION"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\RpgAi" \
         "Publisher" "RpgAi"
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\RpgAi" \
@@ -102,6 +104,8 @@ SectionEnd
 ; ── Uninstall ────────────────────────────────────────────────────────────────
 Section "Uninstall"
     Delete "$INSTDIR\rpgai.exe"
+    Delete "$INSTDIR\rpgai-launcher.bat"
+    Delete "$INSTDIR\getting_started.html"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir /r "$INSTDIR\scripts"
     RMDir /r "$INSTDIR\servers"

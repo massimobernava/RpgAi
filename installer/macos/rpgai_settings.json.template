@@ -1,0 +1,6 @@
+{
+    "provider":  "openrouter",
+    "or_key":    "sk-or-YOUR_KEY_HERE",
+    "or_model":  "anthropic/claude-3.5-sonnet",
+    "port":      8080
+}

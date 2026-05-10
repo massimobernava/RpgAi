@@ -65,12 +65,16 @@ jobs:
           mkdir -p $DEB/usr/share/icons/hicolor/256x256/apps
           mkdir -p $DEB/DEBIAN
 
-          # Executable and data
+          # Executable, launcher and data
           cp build/rpgai $DEB/usr/local/bin/
-          cp -r scripts/.       $DEB/usr/local/share/rpgai/scripts/
-          cp -r t2i_locale/.    $DEB/usr/local/share/rpgai/servers/t2i/
+          cp installer/linux/rpgai-web $DEB/usr/local/bin/
+          chmod +x $DEB/usr/local/bin/rpgai-web
+          cp -r scripts/.         $DEB/usr/local/share/rpgai/scripts/
+          cp -r t2i_locale/.      $DEB/usr/local/share/rpgai/servers/t2i/
           cp -r faceswap_locale/. $DEB/usr/local/share/rpgai/servers/faceswap/
-          cp -r qwen_locale/.   $DEB/usr/local/share/rpgai/servers/qwen/
+          cp -r qwen_locale/.     $DEB/usr/local/share/rpgai/servers/qwen/
+          cp installer/macos/getting_started.html \
+             $DEB/usr/local/share/rpgai/
 
           # Icons (from source PNG if present, else skip)
           if [ -f installer/rpgai-1024.png ]; then
@@ -82,17 +86,7 @@ jobs:
           fi
 
           # .desktop file
-          cat > $DEB/usr/share/applications/rpgai.desktop << 'EOF'
-          [Desktop Entry]
-          Version=1.0
-          Type=Application
-          Name=RpgAi
-          Comment=Interactive AI story engine
-          Exec=rpgai
-          Icon=rpgai
-          Terminal=true
-          Categories=Game;
-          EOF
+          cp installer/linux/rpgai.desktop $DEB/usr/share/applications/
 
           # control
           cat > $DEB/DEBIAN/control << EOF
@@ -181,10 +175,17 @@ jobs:
           cp -r t2i_locale/.      pkg_payload/usr/local/share/rpgai/servers/t2i/
           cp -r faceswap_locale/. pkg_payload/usr/local/share/rpgai/servers/faceswap/
           cp -r qwen_locale/.     pkg_payload/usr/local/share/rpgai/servers/qwen/
+          cp installer/macos/getting_started.html \
+             pkg_payload/usr/local/share/rpgai/
 
-          # Copy icon into share dir so postinstall can use it
+          # .app bundle → /Applications/
+          APP=pkg_payload/Applications/RpgAi.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp installer/macos/RpgAi.app/Contents/Info.plist "$APP/Contents/"
+          cp installer/macos/RpgAi.app/Contents/MacOS/RpgAi "$APP/Contents/MacOS/"
+          chmod +x "$APP/Contents/MacOS/RpgAi"
           [ -f installer/macos/rpgai.icns ] && \
-            cp installer/macos/rpgai.icns pkg_payload/usr/local/share/rpgai/
+            cp installer/macos/rpgai.icns "$APP/Contents/Resources/rpgai.icns"
 
           pkgbuild \
             --root pkg_payload \
@@ -240,16 +241,18 @@ jobs:
           $VERSION = "${{ github.event.inputs.version }}".TrimStart("v")
 
           # Stage files next to the NSIS script
-          Copy-Item build\rpgai.exe               installer\windows\
-          Copy-Item -Recurse scripts              installer\windows\scripts       -Force
-          Copy-Item -Recurse t2i_locale           installer\windows\t2i_locale    -Force
-          Copy-Item -Recurse faceswap_locale      installer\windows\faceswap_locale -Force
-          Copy-Item -Recurse qwen_locale          installer\windows\qwen_locale   -Force
-          Copy-Item LICENSE                       installer\windows\               -Force
+          Copy-Item build\rpgai.exe                    installer\windows\
+          Copy-Item -Recurse scripts               installer\windows\scripts         -Force
+          Copy-Item -Recurse t2i_locale            installer\windows\t2i_locale      -Force
+          Copy-Item -Recurse faceswap_locale       installer\windows\faceswap_locale -Force
+          Copy-Item -Recurse qwen_locale           installer\windows\qwen_locale     -Force
+          Copy-Item installer\macos\getting_started.html installer\windows\          -Force
+          Copy-Item LICENSE                        installer\windows\                -Force
 
           # Patch version
           (Get-Content installer\windows\setup.nsi) `
-            -replace 'OutFile "RpgAi-Setup.exe"', "OutFile `"RpgAi-$VERSION-Setup.exe`"" |
+            -replace 'OutFile "RpgAi-Setup.exe"', "OutFile `"RpgAi-$VERSION-Setup.exe`"" `
+            -replace 'RPGAI_VERSION', $VERSION |
             Set-Content installer\windows\setup.nsi
 
           & "C:\Program Files (x86)\NSIS\makensis.exe" installer\windows\setup.nsi

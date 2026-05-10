@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Getting Started — RpgAi</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #111;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+  }
+  .card {
+    max-width: 640px;
+    width: 100%;
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    padding: 2.5rem;
+  }
+  h1 { font-size: 1.8rem; font-weight: 700; color: #fff; margin-bottom: .4rem; }
+  .tagline { color: #888; font-size: .95rem; margin-bottom: 2rem; }
+  h2 { font-size: 1rem; font-weight: 600; color: #aaa; text-transform: uppercase;
+       letter-spacing: .08em; margin: 1.8rem 0 .8rem; }
+  .step {
+    display: flex; gap: 1rem; align-items: flex-start;
+    background: #222; border-radius: 8px; padding: 1rem 1.2rem;
+    margin-bottom: .6rem;
+  }
+  .num {
+    background: #333; color: #fff; border-radius: 50%;
+    width: 28px; height: 28px; display: flex; align-items: center;
+    justify-content: center; font-size: .8rem; font-weight: 700; flex-shrink: 0;
+  }
+  .step p { font-size: .9rem; line-height: 1.5; color: #ccc; }
+  .step strong { color: #fff; }
+  .badge {
+    display: inline-block; background: #2a3a2a; color: #6fcf6f;
+    border-radius: 4px; font-size: .75rem; padding: .15rem .5rem;
+    font-weight: 600; margin-left: .4rem; vertical-align: middle;
+  }
+  .badge.cloud { background: #2a2a3a; color: #7f9cf5; }
+  .provider-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin-top: .4rem;
+  }
+  .provider {
+    background: #222; border-radius: 8px; padding: .9rem 1rem;
+    font-size: .85rem; color: #ccc; line-height: 1.4;
+  }
+  .provider strong { color: #fff; display: block; margin-bottom: .2rem; }
+  .provider a { color: #7f9cf5; text-decoration: none; font-size: .78rem; }
+  .cta {
+    margin-top: 2rem; background: #1e3a2a; border: 1px solid #2a5a3a;
+    border-radius: 8px; padding: 1.2rem 1.4rem;
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  }
+  .cta p { font-size: .9rem; color: #b0d0b0; line-height: 1.4; }
+  .cta p strong { color: #fff; }
+  .btn {
+    background: #2a7a4a; color: #fff; border: none; border-radius: 6px;
+    padding: .6rem 1.4rem; font-size: .9rem; font-weight: 600;
+    cursor: pointer; white-space: nowrap; text-decoration: none;
+    display: inline-block;
+  }
+  .btn:hover { background: #33905a; }
+  .note { margin-top: 1.5rem; font-size: .8rem; color: #555; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Welcome to RpgAi</h1>
+  <p class="tagline">An AI-powered interactive story engine. Choose your adventure, talk to characters, shape the world.</p>
+
+  <h2>Quick start</h2>
+
+  <div class="step">
+    <div class="num">1</div>
+    <p>RpgAi is already running. <strong>Switch to the browser tab</strong> that opened alongside this page — that is the game interface.</p>
+  </div>
+
+  <div class="step">
+    <div class="num">2</div>
+    <p>By default, RpgAi uses <strong>Ollama</strong> <span class="badge">local · free</span> — an AI that runs entirely on your Mac with no internet or API key required. If Ollama is installed and a model is loaded, you can play immediately.</p>
+  </div>
+
+  <div class="step">
+    <div class="num">3</div>
+    <p>In the game interface: pick a <strong>script</strong>, enter your character name, and start playing. Use the <strong>Settings</strong> panel (⚙ icon) to change the AI provider or load a save.</p>
+  </div>
+
+  <h2>AI providers</h2>
+  <div class="provider-grid">
+    <div class="provider">
+      <strong>Ollama <span class="badge">local · free</span></strong>
+      Runs on your Mac. No API key. Requires Ollama installed with a model (e.g. llama3.2).<br>
+      <a href="https://ollama.com" target="_blank">ollama.com →</a>
+    </div>
+    <div class="provider">
+      <strong>OpenRouter <span class="badge cloud">cloud</span></strong>
+      Access 200+ models (Claude, GPT-4o, Gemini…) with one key. Pay-per-use.<br>
+      <a href="https://openrouter.ai" target="_blank">openrouter.ai →</a>
+    </div>
+    <div class="provider">
+      <strong>Gemini <span class="badge cloud">cloud</span></strong>
+      Google's models. Free tier available.<br>
+      <a href="https://aistudio.google.com" target="_blank">aistudio.google.com →</a>
+    </div>
+    <div class="provider">
+      <strong>OpenAI / Claude <span class="badge cloud">cloud</span></strong>
+      GPT-4o, Claude 3.5 Sonnet and others. API key required.<br>
+      <a href="https://platform.openai.com" target="_blank">openai →</a> ·
+      <a href="https://console.anthropic.com" target="_blank">anthropic →</a>
+    </div>
+  </div>
+
+  <div class="cta">
+    <p>To use a cloud provider: open the <strong>Settings panel</strong> in the game interface, select your provider and paste your API key. Settings are saved automatically.</p>
+    <a class="btn" href="http://localhost:8080" target="_blank">Open RpgAi →</a>
+  </div>
+
+  <p class="note">
+    Your workspace is at <strong>~/Documents/RpgAi</strong>. Scripts, saves, and settings live there.<br>
+    Settings are stored in <code>rpgai_settings.json</code> and updated automatically by the Settings panel.
+  </p>
+</div>
+</body>
+</html>

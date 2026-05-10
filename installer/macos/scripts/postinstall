@@ -15,8 +15,7 @@ SRC="/usr/local/share/rpgai"
 mkdir -p "$DOCS/scripts/lib"
 mkdir -p "$DOCS/scripts/lib/npcs"
 mkdir -p "$DOCS/servers/t2i"
-mkdir -p "$DOCS/servers/tts"
-mkdir -p "$DOCS/servers/npc_mod"
+mkdir -p "$DOCS/servers/faceswap"
 mkdir -p "$DOCS/output"
 mkdir -p "$DOCS/saves"
 
@@ -29,6 +28,7 @@ fi
 if [ ! -f "$DOCS/servers/t2i/server.py" ]; then
     cp -rn "$SRC/servers/." "$DOCS/servers/" 2>/dev/null || true
 fi
+
 
 # Fix ownership (postinstall runs as root)
 chown -R "$REAL_USER" "$DOCS"

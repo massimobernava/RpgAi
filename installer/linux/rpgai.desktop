@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=RpgAi
+Comment=Interactive AI story engine
+Exec=rpgai-web
+Icon=rpgai
+Terminal=false
+Categories=Game;

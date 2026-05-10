@@ -1,0 +1,49 @@
+#!/bin/bash
+# RpgAi launcher — starts the engine in web mode and opens the browser.
+# Provider and API keys are configured in the web UI (Settings panel).
+
+BINARY="/usr/local/bin/rpgai"
+WORKSPACE="$HOME/Documents/RpgAi"
+SHARE="/usr/local/share/rpgai"
+GETTING_STARTED="$SHARE/getting_started.html"
+PORT=8080
+
+if [ ! -f "$BINARY" ]; then
+    echo "RpgAi binary not found at $BINARY. Please reinstall." >&2
+    exit 1
+fi
+
+mkdir -p "$WORKSPACE/scripts" "$WORKSPACE/saves"
+
+# Copy default scripts on first run
+if [ ! -f "$WORKSPACE/scripts/fantasy_demo.lua" ]; then
+    cp -rn "$SHARE/scripts/." "$WORKSPACE/scripts/" 2>/dev/null || true
+fi
+
+# First-run detection (before engine creates settings file)
+FIRST_RUN=false
+[ ! -f "$WORKSPACE/rpgai_settings.json" ] && FIRST_RUN=true
+
+cd "$WORKSPACE"
+"$BINARY" \
+    --web \
+    --path "$WORKSPACE/scripts/" \
+    --save-path "$WORKSPACE/saves/" \
+    --port $PORT &
+
+RPGAI_PID=$!
+
+# Wait for server ready (max 15 s)
+for i in $(seq 1 15); do
+    sleep 1
+    curl -sf "http://localhost:$PORT/" > /dev/null 2>&1 && break
+done
+
+# Open getting started on first run
+if $FIRST_RUN && [ -f "$GETTING_STARTED" ]; then
+    xdg-open "$GETTING_STARTED" 2>/dev/null || true
+fi
+
+xdg-open "http://localhost:$PORT" 2>/dev/null || true
+
+wait $RPGAI_PID

@@ -29,6 +29,9 @@ rpgai_qwen36_remote.sh
 # Settings file — contains API keys
 rpgai_settings.json
 
+# GitHub token
+.github_token
+
 # Private game scripts (not published — only fantasy_demo.lua is public)
 npc_mod/
 scripts/lib/npcs/
