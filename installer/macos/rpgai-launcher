@@ -31,6 +31,7 @@ cd "$WORKSPACE"
     --save-path "$WORKSPACE/saves/" &
 
 RPGAI_PID=$!
+trap 'kill $RPGAI_PID 2>/dev/null; exit' TERM INT
 
 # ── Wait for server ready (max 15 s) ─────────────────────────────────────────
 for i in $(seq 1 15); do
