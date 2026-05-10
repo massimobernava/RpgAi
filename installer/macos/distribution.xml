@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>RpgAi</title>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+    <pkg-ref id="com.rpgai.app"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.rpgai.app"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.rpgai.app" visible="false">
+        <pkg-ref id="com.rpgai.app"/>
+    </choice>
+    <pkg-ref id="com.rpgai.app" version="1.0.0" onConclusion="none">RpgAi.pkg</pkg-ref>
+</installer-gui-script>

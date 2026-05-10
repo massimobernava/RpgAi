@@ -807,7 +807,11 @@ static json load_turns_for_replay(const std::string& filename) {
                         long long interp = (n == 1) ? t1 : t0 + (t1 - t0) * (long long)i / (long long)(n - 1);
                         std::tm tm_u{};
                         std::time_t tt = (std::time_t)interp;
+#ifdef _WIN32
+                        gmtime_s(&tm_u, &tt);
+#else
                         gmtime_r(&tt, &tm_u);
+#endif
                         char buf[32];
                         std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_u);
                         turns[i]["timestamp"] = buf;
@@ -856,7 +860,11 @@ static long long ts_to_utc_seconds(const std::string& ts) {
         } else { return -1; }
     } catch (...) { return -1; }
     t.tm_isdst = -1;
+#ifdef _WIN32
+    std::time_t tt = is_utc ? _mkgmtime(&t) : std::mktime(&t);
+#else
     std::time_t tt = is_utc ? timegm(&t) : std::mktime(&t);
+#endif
     if (tt == (std::time_t)-1) return -1;
     return static_cast<long long>(tt);
 }
@@ -2591,6 +2599,10 @@ sol::table result = f_result;
         // Jobs are kept in memory for the entire session.
         // =================================================================
 
+        // Windows headers define ERROR as a macro — undef before the enum
+#ifdef ERROR
+#undef ERROR
+#endif
         struct ImageJob {
             enum class State { PENDING, DONE, ERROR };
             State       state   = State::PENDING;

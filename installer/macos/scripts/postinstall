@@ -1,0 +1,36 @@
+#!/bin/bash
+set -e
+
+# Find the real logged-in user (postinstall runs as root)
+REAL_USER=$(stat -f "%Su" /dev/console 2>/dev/null || logname 2>/dev/null || "")
+if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
+    exit 0
+fi
+
+USER_HOME=$(eval echo "~$REAL_USER")
+DOCS="$USER_HOME/Documents/RpgAi"
+SRC="/usr/local/share/rpgai"
+
+# Create workspace structure
+mkdir -p "$DOCS/scripts/lib"
+mkdir -p "$DOCS/scripts/lib/npcs"
+mkdir -p "$DOCS/servers/t2i"
+mkdir -p "$DOCS/servers/tts"
+mkdir -p "$DOCS/servers/npc_mod"
+mkdir -p "$DOCS/output"
+mkdir -p "$DOCS/saves"
+
+# Copy default scripts only if workspace is fresh
+if [ ! -f "$DOCS/scripts/fantasy_demo.lua" ]; then
+    cp -rn "$SRC/scripts/." "$DOCS/scripts/" 2>/dev/null || true
+fi
+
+# Copy Python servers only if workspace is fresh
+if [ ! -f "$DOCS/servers/t2i/server.py" ]; then
+    cp -rn "$SRC/servers/." "$DOCS/servers/" 2>/dev/null || true
+fi
+
+# Fix ownership (postinstall runs as root)
+chown -R "$REAL_USER" "$DOCS"
+
+exit 0

@@ -16,13 +16,10 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux
-            binary: rpgai
           - os: macos-latest
             name: macos
-            binary: rpgai
           - os: windows-latest
             name: windows
-            binary: rpgai.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -37,13 +34,102 @@ jobs:
           sudo apt-get install -y \
             libluajit-5.1-dev \
             libcurl4-openssl-dev \
-            libasio-dev
+            libasio-dev \
+            dpkg-dev \
+            imagemagick
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j$(nproc)
+
+      - name: Package (Linux .deb)
+        if: runner.os == 'Linux'
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          VERSION_NUM="${VERSION#v}"
+          DEB=rpgai_${VERSION_NUM}_amd64
+
+          # Directories
+          mkdir -p $DEB/usr/local/bin
+          mkdir -p $DEB/usr/local/share/rpgai/scripts
+          mkdir -p $DEB/usr/local/share/rpgai/servers/t2i
+          mkdir -p $DEB/usr/local/share/rpgai/servers/faceswap
+          mkdir -p $DEB/usr/local/share/rpgai/servers/qwen
+          mkdir -p $DEB/usr/share/applications
+          mkdir -p $DEB/usr/share/icons/hicolor/16x16/apps
+          mkdir -p $DEB/usr/share/icons/hicolor/32x32/apps
+          mkdir -p $DEB/usr/share/icons/hicolor/48x48/apps
+          mkdir -p $DEB/usr/share/icons/hicolor/128x128/apps
+          mkdir -p $DEB/usr/share/icons/hicolor/256x256/apps
+          mkdir -p $DEB/DEBIAN
+
+          # Executable and data
+          cp build/rpgai $DEB/usr/local/bin/
+          cp -r scripts/.       $DEB/usr/local/share/rpgai/scripts/
+          cp -r t2i_locale/.    $DEB/usr/local/share/rpgai/servers/t2i/
+          cp -r faceswap_locale/. $DEB/usr/local/share/rpgai/servers/faceswap/
+          cp -r qwen_locale/.   $DEB/usr/local/share/rpgai/servers/qwen/
+
+          # Icons (from source PNG if present, else skip)
+          if [ -f installer/rpgai-1024.png ]; then
+            for SIZE in 16 32 48 128 256; do
+              convert installer/rpgai-1024.png \
+                -resize ${SIZE}x${SIZE} \
+                $DEB/usr/share/icons/hicolor/${SIZE}x${SIZE}/apps/rpgai.png
+            done
+          fi
+
+          # .desktop file
+          cat > $DEB/usr/share/applications/rpgai.desktop << 'EOF'
+          [Desktop Entry]
+          Version=1.0
+          Type=Application
+          Name=RpgAi
+          Comment=Interactive AI story engine
+          Exec=rpgai
+          Icon=rpgai
+          Terminal=true
+          Categories=Game;
+          EOF
+
+          # control
+          cat > $DEB/DEBIAN/control << EOF
+          Package: rpgai
+          Version: ${VERSION_NUM}
+          Architecture: amd64
+          Maintainer: RpgAi <noreply@rpgai.local>
+          Description: RpgAi interactive AI story engine
+          EOF
+
+          # postinst
+          cat > $DEB/DEBIAN/postinst << 'POSTINST'
+          #!/bin/bash
+          set -e
+          REAL_USER="${SUDO_USER:-$USER}"
+          if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then exit 0; fi
+          USER_HOME=$(eval echo "~$REAL_USER")
+          DOCS="$USER_HOME/RpgAi"
+          SRC="/usr/local/share/rpgai"
+          mkdir -p "$DOCS/scripts/lib" "$DOCS/servers" "$DOCS/output" "$DOCS/saves"
+          [ ! -f "$DOCS/scripts/fantasy_demo.lua" ] && cp -rn "$SRC/scripts/." "$DOCS/scripts/" 2>/dev/null || true
+          [ ! -f "$DOCS/servers/t2i/server.py" ]   && cp -rn "$SRC/servers/." "$DOCS/servers/" 2>/dev/null || true
+          chown -R "$REAL_USER" "$DOCS"
+          update-icon-caches /usr/share/icons/hicolor 2>/dev/null || true
+          exit 0
+          POSTINST
+          chmod 755 $DEB/DEBIAN/postinst
+
+          dpkg-deb --build $DEB
+          mv ${DEB}.deb rpgai-linux.deb
+
+      - name: Upload (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpgai-linux
+          path: rpgai-linux.deb
 
       # ── macOS ──────────────────────────────────────────────────────────────
       - name: Install deps (macOS)
@@ -56,7 +142,71 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j$(sysctl -n hw.ncpu)
 
-      # ── Windows (MSYS2 / MinGW64) ──────────────────────────────────────────
+      - name: Generate .icns (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          if [ ! -f installer/rpgai-1024.png ]; then
+            echo "No icon found at installer/rpgai-1024.png — skipping .icns generation"
+            exit 0
+          fi
+          ICONSET=installer/macos/rpgai.iconset
+          mkdir -p "$ICONSET"
+          sips -z 16   16   installer/rpgai-1024.png --out "$ICONSET/icon_16x16.png"
+          sips -z 32   32   installer/rpgai-1024.png --out "$ICONSET/icon_16x16@2x.png"
+          sips -z 32   32   installer/rpgai-1024.png --out "$ICONSET/icon_32x32.png"
+          sips -z 64   64   installer/rpgai-1024.png --out "$ICONSET/icon_32x32@2x.png"
+          sips -z 128  128  installer/rpgai-1024.png --out "$ICONSET/icon_128x128.png"
+          sips -z 256  256  installer/rpgai-1024.png --out "$ICONSET/icon_128x128@2x.png"
+          sips -z 256  256  installer/rpgai-1024.png --out "$ICONSET/icon_256x256.png"
+          sips -z 512  512  installer/rpgai-1024.png --out "$ICONSET/icon_256x256@2x.png"
+          sips -z 512  512  installer/rpgai-1024.png --out "$ICONSET/icon_512x512.png"
+          sips -z 1024 1024 installer/rpgai-1024.png --out "$ICONSET/icon_512x512@2x.png"
+          iconutil -c icns "$ICONSET" -o installer/macos/rpgai.icns
+          echo "icns generated"
+
+      - name: Package (macOS .pkg)
+        if: runner.os == 'macOS'
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          VERSION_NUM="${VERSION#v}"
+
+          mkdir -p pkg_payload/usr/local/bin
+          mkdir -p pkg_payload/usr/local/share/rpgai/scripts
+          mkdir -p pkg_payload/usr/local/share/rpgai/servers/t2i
+          mkdir -p pkg_payload/usr/local/share/rpgai/servers/faceswap
+          mkdir -p pkg_payload/usr/local/share/rpgai/servers/qwen
+
+          cp build/rpgai pkg_payload/usr/local/bin/
+          cp -r scripts/.         pkg_payload/usr/local/share/rpgai/scripts/
+          cp -r t2i_locale/.      pkg_payload/usr/local/share/rpgai/servers/t2i/
+          cp -r faceswap_locale/. pkg_payload/usr/local/share/rpgai/servers/faceswap/
+          cp -r qwen_locale/.     pkg_payload/usr/local/share/rpgai/servers/qwen/
+
+          # Copy icon into share dir so postinstall can use it
+          [ -f installer/macos/rpgai.icns ] && \
+            cp installer/macos/rpgai.icns pkg_payload/usr/local/share/rpgai/
+
+          pkgbuild \
+            --root pkg_payload \
+            --scripts installer/macos/scripts \
+            --identifier com.rpgai.app \
+            --version "$VERSION_NUM" \
+            RpgAi.pkg
+
+          productbuild \
+            --distribution installer/macos/distribution.xml \
+            --package-path . \
+            --resources installer/macos \
+            rpgai-macos.pkg
+
+      - name: Upload (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpgai-macos
+          path: rpgai-macos.pkg
+
+      # ── Windows (MSYS2 build + NSIS package) ───────────────────────────────
       - name: Setup MSYS2 (Windows)
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
@@ -78,14 +228,105 @@ jobs:
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j$(nproc)
 
-      # ── Upload artifact ────────────────────────────────────────────────────
-      - name: Upload artifact
+      - name: Generate .ico (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          if (-not (Test-Path "installer\rpgai-1024.png")) {
+            Write-Host "No icon found — skipping .ico generation"
+            exit 0
+          }
+          # Use .NET to create multi-size .ico from PNG
+          Add-Type -AssemblyName System.Drawing
+          $src = [System.Drawing.Image]::FromFile((Resolve-Path "installer\rpgai-1024.png"))
+          $sizes = @(16, 32, 48, 64, 128, 256)
+          $ms = New-Object System.IO.MemoryStream
+
+          # ICO header
+          $writer = New-Object System.IO.BinaryWriter($ms)
+          $writer.Write([uint16]0)      # reserved
+          $writer.Write([uint16]1)      # type: ICO
+          $writer.Write([uint16]$sizes.Count)
+
+          $imgStreams = @()
+          foreach ($sz in $sizes) {
+            $bmp = New-Object System.Drawing.Bitmap($sz, $sz)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.DrawImage($src, 0, 0, $sz, $sz)
+            $g.Dispose()
+            $imgMs = New-Object System.IO.MemoryStream
+            $bmp.Save($imgMs, [System.Drawing.Imaging.ImageFormat]::Png)
+            $imgStreams += $imgMs
+            $bmp.Dispose()
+          }
+
+          # Directory entries (offset starts after header + directory)
+          $dirEntrySize = 16
+          $dataOffset = 6 + $dirEntrySize * $sizes.Count
+          foreach ($imgMs in $imgStreams) {
+            $bytes = $imgMs.ToArray()
+            $sz = if ($bytes.Length -gt 0) { [int]([Math]::Sqrt(($imgMs.Length - 8) / 4)) } else { 0 }
+            $writer.Write([byte]0)   # width (0=256)
+            $writer.Write([byte]0)   # height
+            $writer.Write([byte]0)   # color count
+            $writer.Write([byte]0)   # reserved
+            $writer.Write([uint16]1) # color planes
+            $writer.Write([uint16]32)# bpp
+            $writer.Write([uint32]$imgMs.ToArray().Length)
+            $writer.Write([uint32]$dataOffset)
+            $dataOffset += $imgMs.ToArray().Length
+          }
+          foreach ($imgMs in $imgStreams) {
+            $writer.Write($imgMs.ToArray())
+          }
+
+          [System.IO.File]::WriteAllBytes("installer\windows\rpgai.ico", $ms.ToArray())
+          Write-Host "rpgai.ico generated"
+
+      - name: Install NSIS (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: choco install nsis --yes --no-progress
+
+      - name: Package (Windows .exe installer)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $VERSION = "${{ github.event.inputs.version }}".TrimStart("v")
+
+          # Stage files next to the NSIS script
+          Copy-Item build\rpgai.exe               installer\windows\
+          Copy-Item -Recurse scripts              installer\windows\scripts       -Force
+          Copy-Item -Recurse t2i_locale           installer\windows\t2i_locale    -Force
+          Copy-Item -Recurse faceswap_locale      installer\windows\faceswap_locale -Force
+          Copy-Item -Recurse qwen_locale          installer\windows\qwen_locale   -Force
+          Copy-Item LICENSE                       installer\windows\               -Force
+
+          # Enable icon lines in NSIS script if .ico was generated
+          if (Test-Path "installer\windows\rpgai.ico") {
+            (Get-Content installer\windows\setup.nsi) `
+              -replace '; !define MUI_ICON',    '!define MUI_ICON' `
+              -replace '; !define MUI_UNICON',  '!define MUI_UNICON' |
+              Set-Content installer\windows\setup.nsi
+          }
+
+          # Patch version
+          (Get-Content installer\windows\setup.nsi) `
+            -replace 'OutFile "RpgAi-Setup.exe"', "OutFile `"RpgAi-$VERSION-Setup.exe`"" |
+            Set-Content installer\windows\setup.nsi
+
+          & "C:\Program Files (x86)\NSIS\makensis.exe" installer\windows\setup.nsi
+          Move-Item "installer\windows\RpgAi-$VERSION-Setup.exe" "rpgai-windows-setup.exe"
+
+      - name: Upload (Windows)
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: rpgai-${{ matrix.name }}
-          path: build/${{ matrix.binary }}
+          name: rpgai-windows
+          path: rpgai-windows-setup.exe
 
-  # ── Create draft release with all three binaries ──────────────────────────
+  # ── Create draft release ──────────────────────────────────────────────────
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -102,13 +343,6 @@ jobs:
         with:
           path: artifacts
 
-      - name: Collect binaries
-        run: |
-          cp artifacts/rpgai-linux/rpgai        rpgai-linux
-          cp artifacts/rpgai-macos/rpgai        rpgai-macos
-          cp artifacts/rpgai-windows/rpgai.exe  rpgai-windows.exe
-          chmod +x rpgai-linux rpgai-macos
-
       - name: Create tag and draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -122,6 +356,6 @@ jobs:
             --title "RpgAi $VERSION" \
             --draft \
             --generate-notes \
-            rpgai-linux \
-            rpgai-macos \
-            rpgai-windows.exe
+            artifacts/rpgai-linux/rpgai-linux.deb \
+            artifacts/rpgai-macos/rpgai-macos.pkg \
+            artifacts/rpgai-windows/rpgai-windows-setup.exe

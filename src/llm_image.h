@@ -576,7 +576,11 @@ inline long long ts_to_utc_seconds(const std::string& ts) {
         } else { return -1; }
     } catch (...) { return -1; }
     t.tm_isdst = -1;
+#ifdef _WIN32
+    std::time_t tt = is_utc ? _mkgmtime(&t) : std::mktime(&t);
+#else
     std::time_t tt = is_utc ? timegm(&t) : std::mktime(&t);
+#endif
     return (tt == (std::time_t)-1) ? -1 : static_cast<long long>(tt);
 }
 

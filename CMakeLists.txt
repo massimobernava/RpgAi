@@ -96,6 +96,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
     target_link_libraries(rpgai PRIVATE stdc++fs)
 endif()
 
+if(WIN32)
+    target_compile_definitions(rpgai PRIVATE _WIN32_WINNT=0x0602)
+endif()
+
 # ===========================================================================
 # Build type
 # ===========================================================================
