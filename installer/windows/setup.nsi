@@ -8,8 +8,8 @@ InstallDirRegKey HKLM "Software\RpgAi" "Install_Dir"
 RequestExecutionLevel admin
 
 ; Icon (place rpgai.ico in installer/windows/)
-; !define MUI_ICON "rpgai.ico"
-; !define MUI_UNICON "rpgai.ico"
+!define MUI_ICON "rpgai.ico"
+!define MUI_UNICON "rpgai.ico"
 
 ; Welcome/Finish page
 !define MUI_WELCOMEPAGE_TITLE "Welcome to RpgAi"
