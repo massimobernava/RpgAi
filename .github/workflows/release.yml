@@ -290,7 +290,6 @@ jobs:
           git push origin "$VERSION"
           gh release create "$VERSION" \
             --title "RpgAi $VERSION" \
-            --draft \
             --generate-notes \
             artifacts/rpgai-linux/rpgai-linux.deb \
             artifacts/rpgai-macos/rpgai-macos.pkg \
