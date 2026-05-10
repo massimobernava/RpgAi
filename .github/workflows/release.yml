@@ -178,11 +178,16 @@ jobs:
           cp installer/macos/getting_started.html \
              pkg_payload/usr/local/share/rpgai/
 
+          # Compile Swift menu bar launcher
+          swiftc -O -o RpgAiMenuBar \
+            installer/macos/RpgAiMenuBar.swift \
+            -framework AppKit
+
           # .app bundle → /Applications/ (assembled from flat source files)
           APP=pkg_payload/Applications/RpgAi.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp installer/macos/Info.plist     "$APP/Contents/"
-          cp installer/macos/rpgai-launcher "$APP/Contents/MacOS/RpgAi"
+          cp installer/macos/Info.plist "$APP/Contents/"
+          cp RpgAiMenuBar               "$APP/Contents/MacOS/RpgAi"
           chmod +x "$APP/Contents/MacOS/RpgAi"
           [ -f installer/macos/rpgai.icns ] && \
             cp installer/macos/rpgai.icns "$APP/Contents/Resources/rpgai.icns"

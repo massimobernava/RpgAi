@@ -25,6 +25,8 @@
     <string>10.14</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>LSUIElement</key>
+    <true/>
     <key>NSHumanReadableCopyright</key>
     <string>RpgAi</string>
 </dict>
