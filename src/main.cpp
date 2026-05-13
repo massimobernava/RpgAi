@@ -4016,7 +4016,14 @@ sol::table result = f_result;
                     result["success"] = true;
                     result["message"] = "Stop signal sent to " + server;
                 } else if (action == "install") {
-                    std::string cmd = "nohup " + pip_cmd() + " install " + pip_deps + pip_install_flags + " > " + log_file + " 2>&1 &";
+                    std::string cmd;
+                    if (cfg.pyEnvType == "conda") {
+                        std::string env = cfg.pyEnvPath.empty() ? "rpgai" : cfg.pyEnvPath;
+                        // Create env if missing, then install deps
+                        cmd = "nohup bash -c \"(conda env list | grep -q '^" + env + " ' || conda create -n " + env + " python=3.10 -y) && conda run -n " + env + " pip install " + pip_deps + "\" > " + log_file + " 2>&1 &";
+                    } else {
+                        cmd = "nohup " + pip_cmd() + " install " + pip_deps + pip_install_flags + " > " + log_file + " 2>&1 &";
+                    }
                     system(cmd.c_str());
                     result["success"] = true;
                     result["message"] = "Installing " + server + " deps — log: " + log_file;
