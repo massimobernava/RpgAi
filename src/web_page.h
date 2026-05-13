@@ -123,6 +123,20 @@ std::string main_page = R"HTML(<!DOCTYPE html>
                    display: block; }
   .msg-image .img-caption { font-size: 11px; color: var(--dim);
                               margin-top: 6px; padding: 0 2px; }
+  /* Slideshow */
+  .ss-controls { display: flex; align-items: center; justify-content: center;
+                 gap: 8px; margin-top: 8px; }
+  .ss-btn { background: var(--surface2); border: 1px solid var(--border);
+            color: var(--fg); border-radius: 6px; padding: 4px 10px;
+            cursor: pointer; font-size: 14px; line-height: 1; }
+  .ss-btn:hover { background: var(--primary); color: #000; }
+  .ss-btn:disabled { opacity: 0.3; cursor: default; }
+  .ss-dots { display: flex; gap: 5px; align-items: center; }
+  .ss-dot  { width: 7px; height: 7px; border-radius: 50%;
+             background: var(--border); cursor: pointer; transition: background .2s; }
+  .ss-dot.active { background: var(--primary); }
+  .ss-counter { font-size: 11px; color: var(--dim); min-width: 36px; text-align: right; }
+  .ss-play { min-width: 34px; }
   .msg-missing { background: rgba(229,165,80,.07); border: 1px solid var(--warn);
                  color: var(--warn); }
   .msg-missing ul { margin: 6px 0 0 16px; font-size: 12px; }
@@ -568,6 +582,14 @@ let gameState      = 'idle';
 let selectedScript = null;
 let selectedSave   = null;
 let busy           = false;
+let bgAudio        = null;   // current looping background audio
+let activeAudios   = [];     // all playing audio instances
+
+function stopAllAudio() {
+  activeAudios.forEach(a => { try { a.pause(); } catch(e){} });
+  activeAudios = [];
+  bgAudio = null;
+}
 
 // History input (frecce su/giu come una shell)
 let inputHistory = [];
@@ -632,6 +654,102 @@ function addImage(b64, caption, mime, tooltip) {
     cap.textContent = caption;
     wrap.appendChild(cap);
   }
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+  return wrap;
+}
+
+// Slideshow: slides = [{b64, mime}, ...], autoPlay = bool, intervalMs = int
+function createSlideshow(slides, caption, autoPlay, intervalMs) {
+  intervalMs = intervalMs || 3000;
+  let current = 0;
+  let timer   = null;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg msg-image';
+
+  const imgEl = document.createElement('img');
+  imgEl.style.cssText = 'max-width:100%;border-radius:4px;display:block;';
+  imgEl.src = 'data:' + (slides[0].mime||'image/png') + ';base64,' + slides[0].b64;
+  wrap.appendChild(imgEl);
+
+  // Controls (hidden if single slide)
+  const controls = document.createElement('div');
+  controls.className = 'ss-controls';
+
+  const prevBtn = document.createElement('button');
+  prevBtn.className = 'ss-btn';
+  prevBtn.textContent = '◀';
+
+  const dotsEl = document.createElement('div');
+  dotsEl.className = 'ss-dots';
+  slides.forEach((_, i) => {
+    const d = document.createElement('span');
+    d.className = 'ss-dot' + (i === 0 ? ' active' : '');
+    d.onclick = () => { stopAuto(); goTo(i); };
+    dotsEl.appendChild(d);
+  });
+
+  const nextBtn = document.createElement('button');
+  nextBtn.className = 'ss-btn';
+  nextBtn.textContent = '▶';
+
+  const playBtn = document.createElement('button');
+  playBtn.className = 'ss-btn ss-play';
+  playBtn.textContent = '⏸';
+
+  const counter = document.createElement('div');
+  counter.className = 'ss-counter';
+  counter.textContent = '1 / ' + slides.length;
+
+  controls.append(prevBtn, dotsEl, nextBtn, playBtn, counter);
+
+  function goTo(idx) {
+    current = ((idx % slides.length) + slides.length) % slides.length;
+    const s = slides[current];
+    imgEl.src = 'data:' + (s.mime||'image/png') + ';base64,' + s.b64;
+    counter.textContent = (current + 1) + ' / ' + slides.length;
+    dotsEl.querySelectorAll('.ss-dot').forEach((d, i) =>
+      d.classList.toggle('active', i === current));
+    prevBtn.disabled = current === 0 && !timer;
+    nextBtn.disabled = current === slides.length - 1 && !timer;
+  }
+
+  function startAuto() {
+    if (timer) clearInterval(timer);
+    timer = setInterval(() => {
+      if (current < slides.length - 1) { goTo(current + 1); }
+      else { stopAuto(); }
+    }, intervalMs);
+    playBtn.textContent = '⏸';
+    prevBtn.disabled = false;
+    nextBtn.disabled = false;
+  }
+
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; }
+    playBtn.textContent = '⏵';
+    prevBtn.disabled = current === 0;
+    nextBtn.disabled = current === slides.length - 1;
+  }
+
+  prevBtn.onclick = () => { stopAuto(); goTo(current - 1); };
+  nextBtn.onclick = () => { stopAuto(); goTo(current + 1); };
+  playBtn.onclick = () => { if (timer) stopAuto(); else startAuto(); };
+
+  if (slides.length > 1) {
+    wrap.appendChild(controls);
+    if (autoPlay) startAuto();
+    else { prevBtn.disabled = true; nextBtn.disabled = false; }
+  }
+
+  if (caption) {
+    const capEl = document.createElement('div');
+    capEl.className = 'img-caption';
+    capEl.textContent = caption;
+    wrap.appendChild(capEl);
+  }
+
   log.appendChild(wrap);
   log.scrollTop = log.scrollHeight;
   return wrap;
@@ -968,6 +1086,7 @@ btnManSave.addEventListener('click', async () => {
 btnQuit.addEventListener('click', () => {
   if (!confirm('Quit the current game?\nUnsaved progress will be lost.'))
     return;
+  stopAllAudio();
   log.innerHTML = '';
   showPreUI();
   loadSaves();
@@ -982,6 +1101,16 @@ async function sendInput() {
   if (gameState === 'idle')                       return;
   if (gameState === 'playing' && !text)           return;
   if (busy)                                       return;
+
+  // /quit and /q: same as the Quit button — stop music and return to pre-screen
+  if (text === '/quit' || text === '/q') {
+    inp.value = '';
+    stopAllAudio();
+    log.innerHTML = '';
+    showPreUI();
+    loadSaves();
+    return;
+  }
 
   inp.value        = '';
   inp.style.height = '';
@@ -1111,7 +1240,7 @@ async function sendInput() {
       addMsg('msg-narration', data.narration || '');
       if (data.display) hud.textContent = data.display;
       if (data.game_over) { handleGameOver(data.game_over_reason); return; }
-      // Suggested action buttons (optional — only if script provides them)
+      await processActions(data.actions);
       showSuggestions(data.suggested_actions);
     }
   } catch (e) {
@@ -1121,6 +1250,80 @@ async function sendInput() {
 
   setInputEnabled(true);
   inp.focus();
+}
+
+async function processActions(actions) {
+  if (!actions || !actions.length) return;
+  for (const action of actions) {
+    if (action.type === 'image') {
+      const path    = action.path    || '';
+      const caption = action.caption || '';
+      if (!path) continue;
+      try {
+        const r = await fetch('/api/serve_file?path=' + encodeURIComponent(path));
+        const d = await r.json();
+        if (d.image) addImage(d.image, caption, d.mime);
+      } catch (e) { /* image load failed silently */ }
+
+    } else if (action.type === 'slideshow') {
+      const paths    = action.images   || [];
+      const caption  = action.caption  || '';
+      const autoPlay = action.auto !== false;
+      const interval = action.interval || 3000;
+      if (!paths.length) continue;
+      try {
+        const results = await Promise.all(paths.map(async p => {
+          const r = await fetch('/api/serve_file?path=' + encodeURIComponent(p));
+          const d = await r.json();
+          return d.image ? { b64: d.image, mime: d.mime || 'image/png' } : null;
+        }));
+        const slides = results.filter(Boolean);
+        if (slides.length === 1) addImage(slides[0].b64, caption, slides[0].mime);
+        else if (slides.length > 1) createSlideshow(slides, caption, autoPlay, interval);
+      } catch (e) { console.warn('Slideshow failed:', e); }
+
+    } else if (action.type === 'audio') {
+      const path   = action.path   || '';
+      const loop   = !!action.loop;
+      const volume = (action.volume !== undefined) ? Number(action.volume) : 1.0;
+      // Stop all current audio before starting new track
+      stopAllAudio();
+      if (!path) continue;
+      try {
+        const r = await fetch('/api/serve_audio?path=' + encodeURIComponent(path));
+        if (!r.ok) continue;
+        const blob  = await r.blob();
+        const url   = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.loop   = loop;
+        audio.volume = Math.max(0, Math.min(1, volume));
+        audio.onended = () => {
+          activeAudios = activeAudios.filter(a => a !== audio);
+          URL.revokeObjectURL(url);
+        };
+        audio.play();
+        activeAudios.push(audio);
+        if (loop) bgAudio = audio;
+      } catch (e) { console.warn('Audio action failed:', e); }
+
+    } else if (action.type === 'tts') {
+      const text  = action.text  || '';
+      const voice = action.voice || '';
+      if (!text) continue;
+      try {
+        const params = new URLSearchParams({ text });
+        if (voice) params.append('voice', voice);
+        const r = await fetch('/api/tts?' + params.toString());
+        if (r.ok) {
+          const blob  = await r.blob();
+          const url   = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          audio.onended = () => URL.revokeObjectURL(url);
+          audio.play();
+        }
+      } catch (e) { console.warn('TTS action failed:', e); }
+    }
+  }
 }
 
 function showSuggestions(actions) {

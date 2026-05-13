@@ -670,9 +670,13 @@ static std::string openai_tool_loop(
 
             if (finish == "tool_calls" && msg.contains("tool_calls")) {
                 for (auto& tc : msg["tool_calls"]) {
+                    if (!tc.contains("function") || tc["function"].is_null()) continue;
+                    auto& fn = tc["function"];
                     std::string tc_id   = tc.value("id", "");
-                    std::string fn_name = tc["function"].value("name", "");
-                    std::string fn_args = tc["function"].value("arguments", "{}");
+                    std::string fn_name = fn.contains("name") && fn["name"].is_string()
+                                         ? fn["name"].get<std::string>() : "";
+                    std::string fn_args = fn.contains("arguments") && fn["arguments"].is_string()
+                                         ? fn["arguments"].get<std::string>() : "{}";
                     std::cerr << "[TOOL] " << fn_name << "(" << fn_args << ")\n";
                     std::string result  = executor(fn_name, fn_args);
                     std::cerr << "[TOOL] → " << result << "\n";
@@ -683,7 +687,7 @@ static std::string openai_tool_loop(
                 // Loop: ask LLM again with tool results
             } else {
                 // Terminal response
-                if (msg.contains("content") && !msg["content"].is_null())
+                if (msg.contains("content") && msg["content"].is_string())
                     return msg["content"].get<std::string>();
                 return "";
             }

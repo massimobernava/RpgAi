@@ -42,6 +42,9 @@ scripts/sogno_lucido_*.lua
 scripts/lib/estate_data.lua
 scripts/lib/estate_dataX.lua
 scripts/lib/estate*
+scripts/data/
+scripts/plaza_data/
+scripts/summertime_data/
 narrative/
 guida/
 
@@ -60,3 +63,6 @@ pipeline_stages/
 pipeline_native/
 installer/macos/RpgAi.app/
 installer/macos/app-template/
+
+# Ancora in fase di test
+tts_locale/

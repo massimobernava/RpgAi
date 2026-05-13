@@ -54,9 +54,9 @@ jobs:
           # Directories
           mkdir -p $DEB/usr/local/bin
           mkdir -p $DEB/usr/local/share/rpgai/scripts
-          mkdir -p $DEB/usr/local/share/rpgai/servers/t2i
-          mkdir -p $DEB/usr/local/share/rpgai/servers/faceswap
-          mkdir -p $DEB/usr/local/share/rpgai/servers/qwen
+          mkdir -p $DEB/usr/local/share/rpgai/servers/t2i_locale
+          mkdir -p $DEB/usr/local/share/rpgai/servers/faceswap_locale
+          mkdir -p $DEB/usr/local/share/rpgai/servers/qwen_locale
           mkdir -p $DEB/usr/share/applications
           mkdir -p $DEB/usr/share/icons/hicolor/16x16/apps
           mkdir -p $DEB/usr/share/icons/hicolor/32x32/apps
@@ -70,9 +70,9 @@ jobs:
           cp installer/linux/rpgai-web $DEB/usr/local/bin/
           chmod +x $DEB/usr/local/bin/rpgai-web
           cp -r scripts/.         $DEB/usr/local/share/rpgai/scripts/
-          cp -r t2i_locale/.      $DEB/usr/local/share/rpgai/servers/t2i/
-          cp -r faceswap_locale/. $DEB/usr/local/share/rpgai/servers/faceswap/
-          cp -r qwen_locale/.     $DEB/usr/local/share/rpgai/servers/qwen/
+          cp -r t2i_locale/.      $DEB/usr/local/share/rpgai/servers/t2i_locale/
+          cp -r faceswap_locale/. $DEB/usr/local/share/rpgai/servers/faceswap_locale/
+          cp -r qwen_locale/.     $DEB/usr/local/share/rpgai/servers/qwen_locale/
           cp installer/macos/getting_started.html \
              $DEB/usr/local/share/rpgai/
 
@@ -104,11 +104,11 @@ jobs:
           REAL_USER="${SUDO_USER:-$USER}"
           if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then exit 0; fi
           USER_HOME=$(eval echo "~$REAL_USER")
-          DOCS="$USER_HOME/RpgAi"
+          DOCS="$USER_HOME/Documents/RpgAi"
           SRC="/usr/local/share/rpgai"
           mkdir -p "$DOCS/scripts/lib" "$DOCS/servers" "$DOCS/output" "$DOCS/saves"
           [ ! -f "$DOCS/scripts/fantasy_demo.lua" ] && cp -rn "$SRC/scripts/." "$DOCS/scripts/" 2>/dev/null || true
-          [ ! -f "$DOCS/servers/t2i/server.py" ]   && cp -rn "$SRC/servers/." "$DOCS/servers/" 2>/dev/null || true
+          [ ! -f "$DOCS/servers/t2i_locale/server.py" ] && cp -rn "$SRC/servers/." "$DOCS/servers/" 2>/dev/null || true
           chown -R "$REAL_USER" "$DOCS"
           update-icon-caches /usr/share/icons/hicolor 2>/dev/null || true
           exit 0
@@ -166,15 +166,15 @@ jobs:
 
           mkdir -p pkg_payload/usr/local/bin
           mkdir -p pkg_payload/usr/local/share/rpgai/scripts
-          mkdir -p pkg_payload/usr/local/share/rpgai/servers/t2i
-          mkdir -p pkg_payload/usr/local/share/rpgai/servers/faceswap
-          mkdir -p pkg_payload/usr/local/share/rpgai/servers/qwen
+          mkdir -p pkg_payload/usr/local/share/rpgai/servers/t2i_locale
+          mkdir -p pkg_payload/usr/local/share/rpgai/servers/faceswap_locale
+          mkdir -p pkg_payload/usr/local/share/rpgai/servers/qwen_locale
 
           cp build/rpgai pkg_payload/usr/local/bin/
           cp -r scripts/.         pkg_payload/usr/local/share/rpgai/scripts/
-          cp -r t2i_locale/.      pkg_payload/usr/local/share/rpgai/servers/t2i/
-          cp -r faceswap_locale/. pkg_payload/usr/local/share/rpgai/servers/faceswap/
-          cp -r qwen_locale/.     pkg_payload/usr/local/share/rpgai/servers/qwen/
+          cp -r t2i_locale/.      pkg_payload/usr/local/share/rpgai/servers/t2i_locale/
+          cp -r faceswap_locale/. pkg_payload/usr/local/share/rpgai/servers/faceswap_locale/
+          cp -r qwen_locale/.     pkg_payload/usr/local/share/rpgai/servers/qwen_locale/
           cp installer/macos/getting_started.html \
              pkg_payload/usr/local/share/rpgai/
 

@@ -1406,6 +1406,105 @@ int main(int argc, char* argv[]) {
             return cosine_similarity(va, vb);
         });
 
+    // composite_images exposed to Lua — alpha-blend a stack of PNG layers into one file.
+    // Lua signature:
+    //   local ok, err = composite_images(layers_table, output_rel_path)
+    //   Each entry in layers_table is either:
+    //     - a string path (relative to --path): resized to canvas, placed at (0,0)
+    //     - a table {path=string, x=int, y=int}: placed at pixel offset, natural size
+    //   Canvas dimensions are taken from the first layer (must be a plain string path).
+    //   output_rel_path: destination relative to --path base dir
+    //   returns: true, "" on success | false, errmsg on failure
+    lua.set_function("composite_images",
+        [&](sol::table layers_tbl, const std::string& out_rel) -> std::tuple<bool, std::string> {
+            namespace fs = std::filesystem;
+
+            struct Layer { std::string path; int x = 0, y = 0; bool positioned = false; };
+
+            try {
+                fs::path base(cfg.basePath);
+                fs::path out_abs = base / out_rel;
+                fs::create_directories(out_abs.parent_path());
+
+                std::vector<Layer> layers;
+                for (auto& kv : layers_tbl) {
+                    if (kv.second.get_type() == sol::type::string) {
+                        layers.push_back({ (base / kv.second.as<std::string>()).string(), 0, 0, false });
+                    } else if (kv.second.get_type() == sol::type::table) {
+                        sol::table t = kv.second.as<sol::table>();
+                        Layer l;
+                        l.path       = (base / t.get_or<std::string>("path", "")).string();
+                        sol::optional<int> ox = t["x"]; l.x = ox ? *ox : 0;
+                        sol::optional<int> oy = t["y"]; l.y = oy ? *oy : 0;
+                        l.positioned = true;
+                        if (!l.path.empty()) layers.push_back(l);
+                    }
+                }
+                if (layers.empty()) return {false, "no layers"};
+
+                // Canvas size from first layer
+                int W = 0, H = 0;
+                {
+                    int w, h, ch;
+                    stbi_uc* tmp = stbi_load(layers[0].path.c_str(), &w, &h, &ch, 4);
+                    if (!tmp) return {false, "cannot load first layer: " + layers[0].path};
+                    W = w; H = h;
+                    stbi_image_free(tmp);
+                }
+
+                std::vector<uint8_t> canvas(W * H * 4, 0);
+
+                auto blend_region = [&](const stbi_uc* src, int src_w, int src_h, int ox, int oy) {
+                    for (int sy = 0; sy < src_h; ++sy) {
+                        int dy = oy + sy;
+                        if (dy < 0 || dy >= H) continue;
+                        for (int sx = 0; sx < src_w; ++sx) {
+                            int dx = ox + sx;
+                            if (dx < 0 || dx >= W) continue;
+                            int si = (sy * src_w + sx) * 4;
+                            int di = (dy * W + dx) * 4;
+                            float sa = src[si+3] / 255.0f;
+                            float da = canvas[di+3] / 255.0f;
+                            float oa = sa + da * (1.0f - sa);
+                            if (oa > 0.0f) {
+                                for (int c = 0; c < 3; ++c)
+                                    canvas[di+c] = static_cast<uint8_t>(
+                                        (src[si+c]*sa + canvas[di+c]*da*(1.0f-sa)) / oa);
+                            }
+                            canvas[di+3] = static_cast<uint8_t>(oa * 255.0f);
+                        }
+                    }
+                };
+
+                for (const auto& layer : layers) {
+                    int w, h, ch;
+                    stbi_uc* img = stbi_load(layer.path.c_str(), &w, &h, &ch, 4);
+                    if (!img) { std::cerr << "[COMPOSITE] skip: " << layer.path << "\n"; continue; }
+
+                    if (layer.positioned) {
+                        // Natural size, blitted at (x,y)
+                        blend_region(img, w, h, layer.x, layer.y);
+                    } else {
+                        // Full-canvas: resize to (W,H) then blit at (0,0)
+                        if (w != W || h != H) {
+                            std::vector<uint8_t> buf(W * H * 4);
+                            stbir_resize_uint8_linear(img, w, h, 0, buf.data(), W, H, 0, STBIR_RGBA);
+                            blend_region(buf.data(), W, H, 0, 0);
+                        } else {
+                            blend_region(img, W, H, 0, 0);
+                        }
+                    }
+                    stbi_image_free(img);
+                }
+
+                int ok = stbi_write_png(out_abs.string().c_str(), W, H, 4, canvas.data(), W * 4);
+                if (!ok) return {false, "write failed: " + out_abs.string()};
+                return {true, ""};
+            } catch (const std::exception& e) {
+                return {false, std::string(e.what())};
+            }
+        });
+
     if (!cfg.webMode) {
         lua.script_file(cfg.basePath + cfg.script);
         load_script_tools(lua);
@@ -1977,6 +2076,30 @@ sol::table result = f_result;
                     }
                 }
 
+                // Optional: actions (array of {type, ...} tables from script)
+                json actions = json::array();
+                sol::object act_obj = res["actions"];
+                if (act_obj.valid() && act_obj.get_type() == sol::type::table) {
+                    sol::table act_tbl = act_obj.as<sol::table>();
+                    for (auto& kv : act_tbl) {
+                        if (kv.second.get_type() == sol::type::table) {
+                            sol::table item = kv.second.as<sol::table>();
+                            json action;
+                            for (auto& field : item) {
+                                if (field.first.get_type() != sol::type::string) continue;
+                                std::string key = field.first.as<std::string>();
+                                if (field.second.get_type() == sol::type::string)
+                                    action[key] = field.second.as<std::string>();
+                                else if (field.second.get_type() == sol::type::number)
+                                    action[key] = field.second.as<double>();
+                                else if (field.second.get_type() == sol::type::boolean)
+                                    action[key] = field.second.as<bool>();
+                            }
+                            if (!action.empty()) actions.push_back(action);
+                        }
+                    }
+                }
+
                 hist.push_back({"user",      player_input, "player"});
                 hist.push_back({"assistant", reply,        "gm"});
 
@@ -1991,6 +2114,7 @@ sol::table result = f_result;
                 result_json["display"]             = display;
                 result_json["game_over"]           = game_over;
                 result_json["suggested_actions"]   = suggested;
+                result_json["actions"]             = actions;
                 result_json["game_over_reason"] = go_reason;
                 return result_json;
             }
@@ -2244,10 +2368,11 @@ sol::table result = f_result;
 
                 cfg.script = script_to_load;
                 for (const char* fn : {"get_commands", "get_scene_images",
-                                       "get_asset_path", "get_asset_prompt"}) {
+                                       "get_asset_path", "get_asset_prompt", "get_tools"}) {
                     lua[fn] = sol::lua_nil;
                 }
                 lua.script_file(cfg.basePath + cfg.script);
+                load_script_tools(lua);
 
                 chat_history.clear();
                 if (!load_session_from_jsonl(full_path, lua, chat_history)) {
@@ -3282,6 +3407,146 @@ sol::table result = f_result;
         });
 
         // -----------------------------------------------------------------
+        // GET /api/tts?text=<text>&voice=<voice>  →  proxy to TTS server
+        // Forwards to the tts_locale server on port 8004, returns audio bytes.
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/tts")([&](const crow::request& req) {
+            std::string text  = req.url_params.get("text")  ? req.url_params.get("text")  : "";
+            std::string voice = req.url_params.get("voice") ? req.url_params.get("voice") : "";
+            if (text.empty()) {
+                crow::response res(400, "Missing text parameter");
+                return res;
+            }
+            // Build TTS server URL
+            std::string tts_url = "http://localhost:8004/tts";
+            std::string sep = "?";
+            auto url_encode = [](const std::string& s) {
+                std::string out;
+                for (unsigned char c : s) {
+                    if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                        out += c;
+                    } else {
+                        char buf[4];
+                        snprintf(buf, sizeof(buf), "%%%02X", c);
+                        out += buf;
+                    }
+                }
+                return out;
+            };
+            tts_url += sep + "text=" + url_encode(text); sep = "&";
+            if (!voice.empty()) tts_url += sep + "voice=" + url_encode(voice);
+
+            // Fetch audio from TTS server via libcurl
+            std::vector<uint8_t> audio_bytes;
+            CURL* curl = curl_easy_init();
+            if (!curl) {
+                crow::response res(500, "curl init failed");
+                return res;
+            }
+            curl_easy_setopt(curl, CURLOPT_URL, tts_url.c_str());
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+                +[](char* ptr, size_t sz, size_t nmemb, void* ud) -> size_t {
+                    auto* v = static_cast<std::vector<uint8_t>*>(ud);
+                    v->insert(v->end(), ptr, ptr + sz * nmemb);
+                    return sz * nmemb;
+                });
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &audio_bytes);
+            long http_code = 0;
+            CURLcode cc = curl_easy_perform(curl);
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+            curl_easy_cleanup(curl);
+
+            if (cc != CURLE_OK || http_code != 200 || audio_bytes.empty()) {
+                crow::response res(502, "TTS server unavailable or returned error");
+                return res;
+            }
+            crow::response res(std::string(audio_bytes.begin(), audio_bytes.end()));
+            res.set_header("Content-Type", "audio/wav");
+            return res;
+        });
+
+        // -----------------------------------------------------------------
+        // GET /api/serve_file?path=<rel_path>  →  serve script-relative file as base64 JSON
+        // Used by action type="image" to show arbitrary script assets by path.
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/serve_file")([&](const crow::request& req) {
+            json result;
+            std::string rel = req.url_params.get("path") ? req.url_params.get("path") : "";
+            if (rel.empty()) {
+                result["success"] = false; result["error"] = "Missing path";
+                crow::response r(400, result.dump());
+                r.set_header("Content-Type", "application/json"); return r;
+            }
+            // Security: resolve and verify it stays within basePath
+            std::filesystem::path base  = std::filesystem::canonical(cfg.basePath);
+            std::filesystem::path full;
+            try {
+                full = std::filesystem::weakly_canonical(base / rel);
+            } catch (...) {
+                result["success"] = false; result["error"] = "Invalid path";
+                crow::response r(400, result.dump());
+                r.set_header("Content-Type", "application/json"); return r;
+            }
+            auto [base_end, _] = std::mismatch(base.begin(), base.end(), full.begin());
+            if (base_end != base.end()) {
+                result["success"] = false; result["error"] = "Path outside basePath";
+                crow::response r(403, result.dump());
+                r.set_header("Content-Type", "application/json"); return r;
+            }
+            if (!std::filesystem::exists(full)) {
+                result["success"] = false; result["error"] = "File not found: " + rel;
+                crow::response r(404, result.dump());
+                r.set_header("Content-Type", "application/json"); return r;
+            }
+            std::ifstream f(full, std::ios::binary);
+            std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
+                                        std::istreambuf_iterator<char>());
+            result["success"] = true;
+            result["image"]   = bytes_to_base64(bytes);
+            auto ext = full.extension().string();
+            if      (ext == ".jpg" || ext == ".jpeg") result["mime"] = "image/jpeg";
+            else if (ext == ".webp")                  result["mime"] = "image/webp";
+            else                                      result["mime"] = "image/png";
+            crow::response r(result.dump());
+            r.set_header("Content-Type", "application/json"); return r;
+        });
+
+        // -----------------------------------------------------------------
+        // GET /api/serve_audio?path=<rel_path>  →  serve script-relative audio file
+        // Returns raw bytes with correct Content-Type (mp3/wav/ogg/m4a).
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/serve_audio")([&](const crow::request& req) {
+            std::string rel = req.url_params.get("path") ? req.url_params.get("path") : "";
+            if (rel.empty()) {
+                crow::response r(400, "Missing path"); return r;
+            }
+            std::filesystem::path base = std::filesystem::canonical(cfg.basePath);
+            std::filesystem::path full;
+            try { full = std::filesystem::weakly_canonical(base / rel); }
+            catch (...) { crow::response r(400, "Invalid path"); return r; }
+            auto [base_end, _] = std::mismatch(base.begin(), base.end(), full.begin());
+            if (base_end != base.end()) {
+                crow::response r(403, "Path outside basePath"); return r;
+            }
+            if (!std::filesystem::exists(full)) {
+                crow::response r(404, "File not found: " + rel); return r;
+            }
+            std::ifstream f(full, std::ios::binary);
+            std::string bytes((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+            auto ext = full.extension().string();
+            std::string mime = "audio/mpeg";
+            if      (ext == ".wav")  mime = "audio/wav";
+            else if (ext == ".ogg")  mime = "audio/ogg";
+            else if (ext == ".m4a")  mime = "audio/mp4";
+            else if (ext == ".flac") mime = "audio/flac";
+            crow::response r(bytes);
+            r.set_header("Content-Type", mime);
+            return r;
+        });
+
+        // -----------------------------------------------------------------
         // GET /api/scene_image?file=<basename>  →  serve cached scene image
         // -----------------------------------------------------------------
         CROW_ROUTE(app, "/api/scene_image")([&](const crow::request& req) {
@@ -3681,17 +3946,28 @@ sol::table result = f_result;
                 std::string server = body.value("server", "");
                 std::string action = body.value("action", "");
 
+                // Derive absolute servers directory from basePath (scripts → workspace → servers)
+                auto srv_base = [&]() -> std::string {
+                    namespace fs = std::filesystem;
+                    if (!cfg.basePath.empty()) {
+                        fs::path bp(cfg.basePath);
+                        if (bp.is_absolute())
+                            return bp.parent_path().parent_path().string() + "/servers/";
+                    }
+                    return "servers/";
+                }();
+
                 std::string script_path, log_file, pip_deps;
                 if (server == "faceswap_locale") {
-                    script_path = "./faceswap_locale/server.py";
+                    script_path = srv_base + "faceswap_locale/server.py";
                     log_file    = "/tmp/rpgai_faceswap_locale.log";
                     pip_deps    = "insightface onnxruntime fastapi uvicorn python-multipart pillow numpy opencv-python-headless";
                 } else if (server == "qwen_locale") {
-                    script_path = "./qwen_locale/server_locale.py";
+                    script_path = srv_base + "qwen_locale/server_locale.py";
                     log_file    = "/tmp/rpgai_qwen.log";
                     pip_deps    = "diffusers torch transformers accelerate fastapi uvicorn pillow";
                 } else if (server == "t2i_locale") {
-                    script_path = "./t2i_locale/server.py";
+                    script_path = srv_base + "t2i_locale/server.py";
                     log_file    = "/tmp/rpgai_t2i.log";
                     pip_deps    = "diffusers torch transformers accelerate fastapi uvicorn pillow pydantic";
                 } else {
@@ -3705,16 +3981,29 @@ sol::table result = f_result;
                 // Build python/pip invocation from configured environment.
                 auto py_cmd = [&]() -> std::string {
                     if (cfg.pyEnvType == "venv")  return cfg.pyEnvPath + "/bin/python3";
-                    if (cfg.pyEnvType == "conda") return "conda run -n " + cfg.pyEnvPath + " python";
+                    if (cfg.pyEnvType == "conda") {
+                        std::string env = cfg.pyEnvPath.empty() ? "rpgai" : cfg.pyEnvPath;
+                        return "conda run -n " + env + " python";
+                    }
                     if (cfg.pyEnvType == "uv")    return "uv run python";
                     return "python3";
                 };
                 auto pip_cmd = [&]() -> std::string {
                     if (cfg.pyEnvType == "venv")  return cfg.pyEnvPath + "/bin/pip";
-                    if (cfg.pyEnvType == "conda") return "conda run -n " + cfg.pyEnvPath + " pip";
+                    if (cfg.pyEnvType == "conda") {
+                        std::string env = cfg.pyEnvPath.empty() ? "rpgai" : cfg.pyEnvPath;
+                        return "conda run -n " + env + " pip";
+                    }
                     if (cfg.pyEnvType == "uv")    return "uv pip";
                     return "pip3";
                 };
+                // On Linux, system Python is often "externally managed" — pass the override flag.
+                auto pip_install_flags = [&]() -> std::string {
+#ifdef __linux__
+                    if (cfg.pyEnvType == "system") return " --break-system-packages";
+#endif
+                    return std::string{};
+                }();
 
                 if (action == "start") {
                     std::string cmd = "nohup " + py_cmd() + " " + script_path + " > " + log_file + " 2>&1 &";
@@ -3727,7 +4016,7 @@ sol::table result = f_result;
                     result["success"] = true;
                     result["message"] = "Stop signal sent to " + server;
                 } else if (action == "install") {
-                    std::string cmd = "nohup " + pip_cmd() + " install " + pip_deps + " > " + log_file + " 2>&1 &";
+                    std::string cmd = "nohup " + pip_cmd() + " install " + pip_deps + pip_install_flags + " > " + log_file + " 2>&1 &";
                     system(cmd.c_str());
                     result["success"] = true;
                     result["message"] = "Installing " + server + " deps — log: " + log_file;

@@ -43,22 +43,22 @@ Section "RpgAi" SecMain
     SetOutPath "$INSTDIR\scripts"
     File /r "scripts\*"
 
-    SetOutPath "$INSTDIR\servers\t2i"
+    SetOutPath "$INSTDIR\servers\t2i_locale"
     File /r "t2i_locale\*"
 
-    SetOutPath "$INSTDIR\servers\faceswap"
+    SetOutPath "$INSTDIR\servers\faceswap_locale"
     File /r "faceswap_locale\*"
 
-    SetOutPath "$INSTDIR\servers\qwen"
+    SetOutPath "$INSTDIR\servers\qwen_locale"
     File /r "qwen_locale\*"
 
     ; Create user workspace in Documents
     CreateDirectory "$DOCUMENTS\RpgAi"
     CreateDirectory "$DOCUMENTS\RpgAi\scripts"
     CreateDirectory "$DOCUMENTS\RpgAi\scripts\lib"
-    CreateDirectory "$DOCUMENTS\RpgAi\servers\t2i"
-    CreateDirectory "$DOCUMENTS\RpgAi\servers\faceswap"
-    CreateDirectory "$DOCUMENTS\RpgAi\servers\qwen"
+    CreateDirectory "$DOCUMENTS\RpgAi\servers\t2i_locale"
+    CreateDirectory "$DOCUMENTS\RpgAi\servers\faceswap_locale"
+    CreateDirectory "$DOCUMENTS\RpgAi\servers\qwen_locale"
     CreateDirectory "$DOCUMENTS\RpgAi\output"
     CreateDirectory "$DOCUMENTS\RpgAi\saves"
 
@@ -68,7 +68,7 @@ Section "RpgAi" SecMain
     skip_scripts:
 
     ; Copy Python servers (only if workspace is fresh)
-    IfFileExists "$DOCUMENTS\RpgAi\servers\t2i\server.py" skip_servers 0
+    IfFileExists "$DOCUMENTS\RpgAi\servers\t2i_locale\server.py" skip_servers 0
         CopyFiles /SILENT "$INSTDIR\servers\*" "$DOCUMENTS\RpgAi\servers\"
     skip_servers:
 

@@ -14,8 +14,9 @@ SRC="/usr/local/share/rpgai"
 # Create workspace structure
 mkdir -p "$DOCS/scripts/lib"
 mkdir -p "$DOCS/scripts/lib/npcs"
-mkdir -p "$DOCS/servers/t2i"
-mkdir -p "$DOCS/servers/faceswap"
+mkdir -p "$DOCS/servers/t2i_locale"
+mkdir -p "$DOCS/servers/faceswap_locale"
+mkdir -p "$DOCS/servers/qwen_locale"
 mkdir -p "$DOCS/output"
 mkdir -p "$DOCS/saves"
 
@@ -25,7 +26,7 @@ if [ ! -f "$DOCS/scripts/fantasy_demo.lua" ]; then
 fi
 
 # Copy Python servers only if workspace is fresh
-if [ ! -f "$DOCS/servers/t2i/server.py" ]; then
+if [ ! -f "$DOCS/servers/t2i_locale/server.py" ]; then
     cp -rn "$SRC/servers/." "$DOCS/servers/" 2>/dev/null || true
 fi
 
