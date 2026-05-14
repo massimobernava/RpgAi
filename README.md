@@ -28,6 +28,7 @@ Whether you want to recreate a classic D&D dungeon crawl, build an interactive m
 - 🧠 **Persistent world state** — NPCs move, relationships evolve, time passes. The game remembers everything
 - 🌐 **Beautiful web UI** — play in your browser with a clean dark interface; no terminal required
 - 🖼 **AI-generated scene images** — automatic scene illustration via image models (WaveSpeed, fal.ai, OpenRouter and more)
+- 🔊 **AI voice narration** — optional local TTS server (Coqui XTTS v2) for zero-shot voice cloning; pipeline playback in the browser so generation and audio overlap seamlessly
 - 💾 **Save & load** — full session persistence with JSONL save files
 - 📖 **RAG narrative style** — feed the engine example narrations to lock in the tone and prose style of your world
 
@@ -38,6 +39,7 @@ Whether you want to recreate a classic D&D dungeon crawl, build an interactive m
 - 🔧 **Hackable C++ core** — clean header-based architecture designed to be extended
 - 🗂 **Smart image cache** — scene images cached by composition key; unchanged scenes reuse existing renders
 - 🔁 **In-game commands** — `/fix`, `/observe`, `/summary`, `/image` and custom Lua commands in both console and web mode
+- 🖥 **Local AI servers** — optional Python servers for local image generation (Qwen-Image-Edit-2511) and TTS (XTTS v2), manageable from the web UI (install deps, start, stop)
 
 ---
 
@@ -82,6 +84,12 @@ RpgAi/
 ├── scripts/
 │   ├── fantasy_demo.lua  # Demo adventure — classic fantasy
 │   └── lib/              # Shared Lua libraries (json, json_repair)
+├── tts_locale/
+│   ├── server.py         # FastAPI TTS server (Coqui XTTS v2, port 8004)
+│   ├── patch_tts_compat.py  # Compatibility patches for PyTorch 2.6+ / transformers 4.37+
+│   └── test_tts.py       # CLI test script (--url for remote servers)
+├── qwen_locale/
+│   └── server_locale.py  # FastAPI image server (Qwen-Image-Edit-2511, port 8000)
 ├── docs/                 # Extended documentation
 ├── vendor/               # Header-only dependencies (see docs/installation.md)
 ├── CMakeLists.txt
@@ -218,6 +226,43 @@ Scripts without `get_tools()` work exactly as before — the engine falls back t
 
 ---
 
+## 🖥 Local servers
+
+RpgAi can offload image generation and TTS to optional Python servers running on the same machine or a remote GPU box. All servers are managed from the **Settings → Local Servers** tab in the web UI — install dependencies, start and stop with one click.
+
+### TTS locale server (`tts_locale/server.py`)
+
+Provides zero-shot voice cloning using **Coqui XTTS v2**. Upload a 6–30 second reference WAV and the model synthesises new speech in that voice.
+
+```bash
+# Install deps (or use the web UI Install button)
+pip install transformers==4.36.2 TTS torchaudio soundfile numpy fastapi uvicorn python-multipart
+
+# Apply compatibility patches for PyTorch 2.6+ and transformers 4.37+
+python tts_locale/patch_tts_compat.py
+
+# Start
+python tts_locale/server.py --host 0.0.0.0
+```
+
+Key options: `--temperature` (voice similarity, default 0.2), `--strip-silence` (clean reference WAV before embedding), `--clean-text` (strip markdown before synthesis), `--device cuda|mps|cpu`.
+
+Once running, configure the narrator voice in Settings → Local Servers → TTS. The web UI fetches audio in sentence-sized chunks fired in parallel — sentence N+1 is generated while sentence N is playing, keeping latency low on long narrations.
+
+### Qwen locale server (`qwen_locale/server_locale.py`)
+
+Provides local image-to-image scene rendering using **Qwen-Image-Edit-2511** (DiT ~14B, BF16). Designed for RTX 5090 / 32 GB VRAM with `--cpu-offload`; works on smaller cards with appropriate quantization flags.
+
+```bash
+# Recommended launch for RTX 5090
+python qwen_locale/server_locale.py \
+  --dtype bf16 --host 0.0.0.0 --lightning --fast --cpu-offload
+```
+
+Set the server URL in **Settings → Image I2I → URL** (e.g. `http://192.168.1.x:8000`). The engine uses it automatically for `/image` commands.
+
+---
+
 ## 📚 Documentation
 
 | Doc | Contents |
@@ -235,9 +280,8 @@ Scripts without `get_tools()` work exactly as before — the engine falls back t
 - [ ] Multi-session web mode (multiple simultaneous players)
 - [ ] Two-level scene cache (hard key + soft narrative key for smart i2i reuse)
 - [ ] WebSocket streaming for real-time narration display
-- [ ] Voice output — multi-voice TTS with per-character voice cloning
-  - Local inference via F5-TTS or Coqui XTTS v2
-  - `--tts-provider` flag: `none` | `f5` | `xtts` | `openai` | `elevenlabs`
+- [x] Narrator TTS — local Coqui XTTS v2 server; pipeline sentence playback; web UI voice selector
+- [ ] Per-NPC voice cloning — Lua `get_npc_voices()` to assign voice profiles to characters
 - [ ] Script hot-reload in web mode
 - [ ] Issue templates for bug reports and feature requests
 
