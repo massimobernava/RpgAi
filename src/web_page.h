@@ -91,7 +91,12 @@ std::string main_page = R"HTML(<!DOCTYPE html>
   .msg { border-radius: var(--radius); padding: 12px 14px;
          line-height: 1.65; max-width: 820px; }
   .msg-narration { background: var(--surface); border-left: 3px solid var(--accent);
-                   color: var(--text); white-space: pre-wrap; }
+                   color: var(--text); white-space: pre-wrap; position: relative; }
+  .tts-btn { position: absolute; top: 8px; right: 8px; background: none; border: none;
+             cursor: pointer; font-size: 14px; opacity: 0.3; transition: opacity .2s;
+             padding: 2px 4px; line-height: 1; }
+  .tts-btn:hover { opacity: 1; }
+  .tts-btn.loading { opacity: 0.6; cursor: wait; }
   .msg-player    { align-self: flex-end; background: rgba(124,111,205,.18);
                    border: 1px solid var(--accent); color: var(--text);
                    font-size: 13px; max-width: 60%; }
@@ -404,25 +409,41 @@ std::string main_page = R"HTML(<!DOCTYPE html>
                 <option value="qwen_local">Qwen Local</option>
               </select>
             </div>
-            <div class="sfield"><label>I2I Model <span id="s-img-i2i-hint" style="color:var(--accent2);font-size:10px"></span></label><input id="s-img-i2i-model" type="text" placeholder="blank = provider default"></div>
+            <!-- hidden for providers that ignore the model field (qwen_local, sdcpp_local) -->
+            <div class="sfield" id="s-img-i2i-model-row">
+              <label>I2I Model <span id="s-img-i2i-hint" style="color:var(--accent2);font-size:10px"></span></label>
+              <input id="s-img-i2i-model" type="text" placeholder="blank = provider default">
+            </div>
           </div>
           <div class="srow">
-            <div class="sfield"><label>I2I URL</label><input id="s-img-i2i-url" type="text"></div>
+            <div class="sfield"><label>I2I URL</label><input id="s-img-i2i-url" type="text" placeholder=""></div>
             <div class="sfield"><label>I2I Key</label><input id="s-img-i2i-key" type="password"></div>
+          </div>
+          <div class="srow">
+            <div class="sfield">
+              <label>Steps (I2I): <span id="s-img-i2i-steps-hint" style="color:var(--accent2);font-size:10px"></span></label>
+              <input id="s-img-i2i-steps" type="number" min="0" max="150" placeholder="0 = same as T2I steps">
+            </div>
+            <div class="sfield">
+              <label>Guidance Scale: <span id="s-img-guidance-scale-val">1.00</span> <span id="s-img-gs-hint" style="color:var(--accent2);font-size:10px"></span></label>
+              <input id="s-img-guidance-scale" type="range" min="0.5" max="10" step="0.1" value="1.0">
+            </div>
           </div>
           <div class="sfield">
             <label>Strength: <span id="s-img-strength-val">0.75</span></label>
             <input id="s-img-strength" type="range" min="0" max="1" step="0.01" value="0.75">
+            <small style="color:var(--muted)">how much i2i deviates from input (0 = copy, 1 = ignore)</small>
           </div>
           <div class="srow">
-            <div class="sfield"><label>LoRA (local name or https:// URL)</label><input id="s-img-lora" type="text" placeholder="subfolder name or CivitAI URL"></div>
+            <div class="sfield"><label>LoRA <small style="color:var(--muted)">local dir or https:// URL</small></label><input id="s-img-lora" type="text" placeholder="subfolder name or CivitAI URL"></div>
             <div class="sfield">
               <label>LoRA Scale: <span id="s-img-lora-scale-val">1.00</span></label>
               <input id="s-img-lora-scale" type="range" min="0" max="2" step="0.05" value="1">
             </div>
           </div>
-          <div class="srow">
-            <div class="sfield"><label>LoRA Model <small style="color:var(--muted)">(/image lora — blank = provider default)</small></label><input id="s-img-lora-model" type="text"></div>
+          <!-- LoRA Model: WaveSpeed only (selects model variant for /image lora) -->
+          <div class="srow" id="s-img-lora-model-row" style="display:none">
+            <div class="sfield"><label>LoRA Model <small style="color:var(--muted)">(WaveSpeed: model for /image lora)</small></label><input id="s-img-lora-model" type="text"></div>
           </div>
         </div>
 
@@ -505,16 +526,70 @@ std::string main_page = R"HTML(<!DOCTYPE html>
           </div>
           <div class="server-card">
             <div style="display:flex;align-items:center;justify-content:space-between">
-              <h4>Qwen Locale Server <small style="font-size:10px;color:var(--dim)">port 8002</small></h4>
+              <h4>Qwen Locale Server <small style="font-size:10px;color:var(--dim)">port 8000</small></h4>
               <span class="server-status">
                 <span id="dot-qwen" class="server-dot"></span>
                 <span id="label-qwen">—</span>
               </span>
             </div>
+            <div class="sfield">
+              <label>Launch args</label>
+              <input id="s-qwen-args" type="text" placeholder="--dtype bf16 --host 0.0.0.0 --lightning --fast --cpu-offload">
+            </div>
             <div class="server-actions">
               <button class="btn btn-secondary" onclick="serverAction('qwen_locale','install')">⬇ Install deps</button>
               <button class="btn btn-primary"   onclick="serverAction('qwen_locale','start')">▶ Start</button>
               <button class="btn btn-ghost"     onclick="serverAction('qwen_locale','stop')">■ Stop</button>
+            </div>
+          </div>
+          <div class="server-card">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <h4>TTS Locale Server <small style="font-size:10px;color:var(--dim)">port 8004</small></h4>
+              <span class="server-status">
+                <span id="dot-tts-locale" class="server-dot"></span>
+                <span id="label-tts-locale">—</span>
+              </span>
+            </div>
+            <div class="sfield">
+              <label>Server URL <small style="color:var(--muted)">(leave empty for localhost)</small></label>
+              <input id="s-tts-url" type="text" placeholder="http://SERVER_IP:8004">
+            </div>
+            <div class="sfield">
+              <label>Python env <small style="color:var(--muted)">(overrides global)</small></label>
+              <select id="s-tts-locale-env-type" onchange="onTtsEnvChange()">
+                <option value="">(use global)</option>
+                <option value="system">system</option>
+                <option value="venv">venv</option>
+                <option value="conda">conda</option>
+                <option value="uv">uv</option>
+              </select>
+            </div>
+            <div class="sfield" id="tts-locale-env-path-row" style="display:none">
+              <label id="tts-locale-env-path-label">Path / Env name</label>
+              <input id="s-tts-locale-env-path" type="text" placeholder="rpgai_tts">
+            </div>
+            <div class="sfield">
+              <label>Narrator voice</label>
+              <select id="s-tts-narrator-voice" style="width:100%">
+                <option value="">(none — click Refresh)</option>
+              </select>
+              <div style="display:flex;gap:6px;margin-top:4px">
+                <button class="btn btn-ghost" style="flex:1" onclick="refreshTtsVoices(true)">↻ Refresh voices</button>
+                <button class="btn btn-ghost" style="flex:1" onclick="testNarratorVoice()">▶ Test voice</button>
+              </div>
+            </div>
+            <div class="sfield">
+              <label>Test sentence</label>
+              <input id="s-tts-test-text" type="text" value="Ciao. Sono il narratore di questa avventura." style="width:100%">
+            </div>
+            <div class="sfield">
+              <label>Launch args</label>
+              <input id="s-tts-locale-args" type="text" placeholder="--host 0.0.0.0">
+            </div>
+            <div class="server-actions">
+              <button class="btn btn-secondary" onclick="serverAction('tts_locale','install')">⬇ Install deps</button>
+              <button class="btn btn-primary"   onclick="serverAction('tts_locale','start')">▶ Start</button>
+              <button class="btn btn-ghost"     onclick="serverAction('tts_locale','stop')">■ Stop</button>
             </div>
           </div>
           <div class="server-card">
@@ -584,6 +659,8 @@ let selectedSave   = null;
 let busy           = false;
 let bgAudio        = null;   // current looping background audio
 let activeAudios   = [];     // all playing audio instances
+let ttsNarratorVoice = '';   // set from settings; empty = TTS disabled in UI
+const ttsCache     = new Map(); // key: voice|text → ArrayBuffer (session-local cache)
 
 function stopAllAudio() {
   activeAudios.forEach(a => { try { a.pause(); } catch(e){} });
@@ -600,8 +677,20 @@ let histIdx      = -1;
    ================================================================ */
 function addMsg(cls, text) {
   const d = document.createElement('div');
-  d.className  = 'msg ' + cls;
-  d.textContent = text;
+  d.className = 'msg ' + cls;
+  if (cls === 'msg-narration' && ttsNarratorVoice) {
+    const span = document.createElement('span');
+    span.textContent = text;
+    d.appendChild(span);
+    const btn = document.createElement('button');
+    btn.className = 'tts-btn';
+    btn.title = 'Play narration';
+    btn.textContent = '🔊';
+    btn.onclick = () => playTTS(text, btn);
+    d.appendChild(btn);
+  } else {
+    d.textContent = text;
+  }
   log.appendChild(d);
   log.scrollTop = log.scrollHeight;
   return d;
@@ -1522,6 +1611,11 @@ scriptFileInput.addEventListener('change', async () => {
 const btnSettings     = document.getElementById('btn-settings');
 const settingsOverlay = document.getElementById('settings-overlay');
 
+// Fetch narrator voice at page load so TTS buttons appear without opening settings
+fetch('/api/settings').then(r => r.json()).then(d => {
+  if (d.success) ttsNarratorVoice = d.tts_narrator_voice || '';
+}).catch(() => {});
+
 function openSettings() {
   loadSettings();
   settingsOverlay.classList.add('open');
@@ -1564,6 +1658,27 @@ const LORA_MODEL_DEFAULTS = {
   wavespeed: 'wavespeed-ai/qwen-image/edit-plus-lora',
 };
 
+const I2I_URL_PLACEHOLDERS = {
+  qwen_local:  'http://127.0.0.1:8000',
+  sdcpp_local: 'http://localhost:7860',
+};
+
+const I2I_STEPS_HINTS = {
+  qwen_local:  '4–8 rec. (Lightning: 4)',
+  sdcpp_local: '20–40 rec.',
+  fal:         '20–40 rec.',
+};
+
+const I2I_GS_HINTS = {
+  qwen_local: 'keep 1.0 for Qwen',
+};
+
+// Providers where the model field is loaded at server startup — not settable here
+const I2I_MODEL_HIDDEN = new Set(['qwen_local', 'sdcpp_local']);
+
+// Only WaveSpeed uses lora_model (selects a different WaveSpeed model variant)
+const I2I_LORA_MODEL_SHOWN = new Set(['wavespeed']);
+
 function effectiveI2iProvider() {
   const i2i = document.getElementById('s-img-i2i-provider').value;
   return i2i || document.getElementById('s-img-provider').value;
@@ -1571,9 +1686,29 @@ function effectiveI2iProvider() {
 
 function updateI2iHints() {
   const prov = effectiveI2iProvider();
+
+  // Model hint + field visibility
   const hint = document.getElementById('s-img-i2i-hint');
   const def  = I2I_DEFAULTS[prov];
   if (hint) hint.textContent = def ? '— default: ' + def : '';
+  const modelRow = document.getElementById('s-img-i2i-model-row');
+  if (modelRow) modelRow.style.display = I2I_MODEL_HIDDEN.has(prov) ? 'none' : '';
+
+  // URL placeholder
+  const urlInput = document.getElementById('s-img-i2i-url');
+  if (urlInput) urlInput.placeholder = I2I_URL_PLACEHOLDERS[prov] || '';
+
+  // Steps hint
+  const stepsHint = document.getElementById('s-img-i2i-steps-hint');
+  if (stepsHint) stepsHint.textContent = I2I_STEPS_HINTS[prov] || '';
+
+  // Guidance scale hint
+  const gsHint = document.getElementById('s-img-gs-hint');
+  if (gsHint) gsHint.textContent = I2I_GS_HINTS[prov] || '';
+
+  // LoRA Model row: WaveSpeed only
+  const loraModelRow = document.getElementById('s-img-lora-model-row');
+  if (loraModelRow) loraModelRow.style.display = I2I_LORA_MODEL_SHOWN.has(prov) ? '' : 'none';
   const loraModel = document.getElementById('s-img-lora-model');
   if (loraModel) loraModel.placeholder = LORA_MODEL_DEFAULTS[prov] || '';
 }
@@ -1581,7 +1716,7 @@ function updateI2iHints() {
 document.getElementById('s-img-provider').addEventListener('change', updateI2iHints);
 document.getElementById('s-img-i2i-provider').addEventListener('change', updateI2iHints);
 
-['s-img-strength','s-img-lora-scale'].forEach(id => {
+['s-img-strength','s-img-lora-scale','s-img-guidance-scale'].forEach(id => {
   const el = document.getElementById(id);
   const vl = document.getElementById(id + '-val');
   if (el && vl) el.addEventListener('input', () => { vl.textContent = parseFloat(el.value).toFixed(2); });
@@ -1625,9 +1760,13 @@ async function loadSettings() {
     sv('s-img-width',        d.img_width  || 1024);
     sv('s-img-height',       d.img_height || 1024);
     sv('s-img-steps',        d.img_steps  || 28);
+    sv('s-img-i2i-steps',   d.img_i2i_steps || 0);
     const str = d.img_strength ?? 0.75;
     sv('s-img-strength', str);
     document.getElementById('s-img-strength-val').textContent = parseFloat(str).toFixed(2);
+    const gs = d.img_guidance_scale ?? 1.0;
+    sv('s-img-guidance-scale', gs);
+    document.getElementById('s-img-guidance-scale-val').textContent = parseFloat(gs).toFixed(2);
     sv('s-img-lora', d.img_lora);
     sv('s-img-lora-model', d.img_lora_model);
     const ls = d.img_lora_scale ?? 1.0;
@@ -1650,6 +1789,18 @@ async function loadSettings() {
     sv('s-faceswap-url', d.faceswap_url);
     sv('s-py-env-type',  d.py_env_type || 'system');
     sv('s-py-env-path',  d.py_env_path || '');
+    sv('s-qwen-args',           d.qwen_locale_args  || '');
+    sv('s-tts-url',             d.tts_url           || '');
+    ttsNarratorVoice = d.tts_narrator_voice || '';
+    // narrator voice: silently populate dropdown (no alert at startup)
+    refreshTtsVoices(false).then(() => {
+      const sel = document.getElementById('s-tts-narrator-voice');
+      if (d.tts_narrator_voice) sel.value = d.tts_narrator_voice;
+    });
+    sv('s-tts-locale-args',     d.tts_locale_args   || '');
+    sv('s-tts-locale-env-type', d.tts_locale_env_type || '');
+    sv('s-tts-locale-env-path', d.tts_locale_env_path || '');
+    onTtsEnvChange();
     onPyEnvChange();
 
     // Pre-select t2i model from saved setting (models fetched when server is up)
@@ -1714,14 +1865,22 @@ async function saveSettings() {
     img_i2i_key:      gv('s-img-i2i-key'),
     img_width:        parseInt(gv('s-img-width'))  || 1024,
     img_height:       parseInt(gv('s-img-height')) || 1024,
-    img_steps:        parseInt(gv('s-img-steps'))  || 28,
-    img_strength:     parseFloat(gv('s-img-strength')) || 0.75,
-    img_lora:         gv('s-img-lora'),
-    img_lora_scale:   parseFloat(gv('s-img-lora-scale')) || 1.0,
-    img_lora_model:   gv('s-img-lora-model'),
+    img_steps:          parseInt(gv('s-img-steps'))            || 28,
+    img_i2i_steps:      parseInt(gv('s-img-i2i-steps'))        || 0,
+    img_strength:       parseFloat(gv('s-img-strength'))        || 0.75,
+    img_guidance_scale: parseFloat(gv('s-img-guidance-scale')) || 1.0,
+    img_lora:           gv('s-img-lora'),
+    img_lora_scale:     parseFloat(gv('s-img-lora-scale'))     || 1.0,
+    img_lora_model:     gv('s-img-lora-model'),
     faceswap_url:     gv('s-faceswap-url'),
     py_env_type:      gv('s-py-env-type'),
     py_env_path:      gv('s-py-env-path'),
+    qwen_locale_args:      gv('s-qwen-args'),
+    tts_url:               gv('s-tts-url'),
+    tts_narrator_voice:    gv('s-tts-narrator-voice'),
+    tts_locale_args:       gv('s-tts-locale-args'),
+    tts_locale_env_type:   gv('s-tts-locale-env-type'),
+    tts_locale_env_path:   gv('s-tts-locale-env-path'),
     base_path:        gv('s-base-path'),
     max_history:      parseInt(gv('s-max-history'))  || 30,
     max_retries:      parseInt(gv('s-max-retries'))  || 3,
@@ -1742,7 +1901,10 @@ async function saveSettings() {
       body: JSON.stringify(payload)
     });
     const d = await r.json();
-    if (d.success) { closeSettings(); addMsg('msg-system', '⚙ Settings saved.'); }
+    if (d.success) {
+      ttsNarratorVoice = payload.tts_narrator_voice || '';
+      closeSettings(); addMsg('msg-system', '⚙ Settings saved.');
+    }
     else addMsg('msg-error', 'Settings error: ' + (d.error || 'unknown'));
   } catch (e) { addMsg('msg-error', 'Settings save failed: ' + e.message); }
 }
@@ -1757,9 +1919,10 @@ async function refreshServerStatus() {
       dot.className  = 'server-dot ' + (up ? 'up' : 'down');
       lbl.textContent = up ? 'Running' : 'Offline';
     };
-    set('dot-faceswap','label-faceswap', d.faceswap_locale);
-    set('dot-qwen',    'label-qwen',     d.qwen_locale);
-    set('dot-t2i',     'label-t2i',      d.t2i_locale);
+    set('dot-faceswap',    'label-faceswap',     d.faceswap_locale);
+    set('dot-qwen',        'label-qwen',         d.qwen_locale);
+    set('dot-tts-locale',  'label-tts-locale',   d.tts_locale);
+    set('dot-t2i',         'label-t2i',          d.t2i_locale);
     if (d.t2i_locale) fetchT2iModels();
     document.getElementById('t2i-model-row').style.display = d.t2i_locale ? '' : 'none';
   } catch (_) {}
@@ -1796,12 +1959,120 @@ function onT2iModelChange() {
   }).catch(() => {});
 }
 
+function splitSentences(text) {
+  // Split on sentence-ending punctuation followed by whitespace or end of string
+  return text.split(/(?<=[.!?])\s+/u).map(s => s.trim()).filter(Boolean);
+}
+
+async function fetchTTSBuffer(text, voice) {
+  const key = voice + '|' + text;
+  if (ttsCache.has(key)) return ttsCache.get(key).slice(0); // clone: decodeAudioData detaches
+  const r = await fetch('/api/tts?' + new URLSearchParams({ text, voice }));
+  if (!r.ok) return null;
+  const buf = await r.arrayBuffer();
+  ttsCache.set(key, buf);
+  return buf.slice(0);
+}
+
+async function playTTS(text, btn) {
+  if (!ttsNarratorVoice) return;
+  const sentences = splitSentences(text);
+  if (!sentences.length) return;
+  if (btn) { btn.textContent = '⏳'; btn.classList.add('loading'); }
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    // Fire all sentence fetches in parallel
+    const bufPromises = sentences.map(s => fetchTTSBuffer(s, ttsNarratorVoice));
+    let nextStart = ctx.currentTime + 0.05;
+    let first = true;
+    for (const p of bufPromises) {
+      const buf = await p;
+      if (!buf) continue;
+      const audioBuf = await ctx.decodeAudioData(buf);
+      const src = ctx.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(ctx.destination);
+      const t = Math.max(ctx.currentTime + 0.01, nextStart);
+      src.start(t);
+      nextStart = t + audioBuf.duration;
+      if (first && btn) { btn.textContent = '🔊'; btn.classList.remove('loading'); first = false; }
+    }
+  } catch(e) {
+    console.warn('TTS error:', e);
+    if (btn) { btn.textContent = '🔊'; btn.classList.remove('loading'); }
+  }
+}
+
+async function refreshTtsVoices(showAlert) {
+  const sel = document.getElementById('s-tts-narrator-voice');
+  const current = sel.value;
+  const urlOverride = (document.getElementById('s-tts-url') || {}).value || '';
+  const params = urlOverride ? '?url=' + encodeURIComponent(urlOverride) : '';
+  try {
+    const r = await fetch('/api/tts/voices' + params);
+    if (!r.ok) {
+      if (showAlert) alert('TTS server unreachable. Check URL and that the server is running.');
+      return;
+    }
+    const d = await r.json();
+    const voices = d.voices || [];
+    sel.innerHTML = '<option value="">(none)</option>';
+    voices.forEach(v => {
+      const o = document.createElement('option');
+      o.value = o.textContent = v;
+      if (v === current) o.selected = true;
+      sel.appendChild(o);
+    });
+    if (showAlert && voices.length === 0) alert('Server reachable but no voices found. Add voices via POST /voices/add.');
+  } catch(e) {
+    if (showAlert) alert('TTS error: ' + e.message);
+  }
+}
+
+async function testNarratorVoice() {
+  const voice = document.getElementById('s-tts-narrator-voice').value;
+  if (!voice) { alert('Select a narrator voice first, then click Refresh.'); return; }
+  const textEl = document.getElementById('s-tts-test-text');
+  const text = (textEl && textEl.value.trim()) || 'Ciao. Sono il narratore di questa avventura.';
+  try {
+    const buf = await fetchTTSBuffer(text, voice);
+    if (!buf) { alert('TTS server error or unreachable.'); return; }
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuf = await ctx.decodeAudioData(buf);
+    const src = ctx.createBufferSource();
+    src.buffer = audioBuf;
+    src.connect(ctx.destination);
+    src.start();
+  } catch(e) { alert('TTS error: ' + e.message); }
+}
+
+function onTtsEnvChange() {
+  const t = document.getElementById('s-tts-locale-env-type').value;
+  const row = document.getElementById('tts-locale-env-path-row');
+  const lbl = document.getElementById('tts-locale-env-path-label');
+  row.style.display = t && t !== 'system' ? '' : 'none';
+  if (lbl) lbl.textContent = t === 'conda' ? 'Env name' : 'Path';
+}
+
 async function serverAction(server, action) {
   try {
+    const argsEl = document.getElementById('s-' + server.replace('_','-') + '-args');
+    const extra_args = (action === 'start' && argsEl) ? argsEl.value.trim() : '';
+    // Per-server env override (e.g. TTS uses a separate conda env)
+    const srvEnvTypeEl = document.getElementById('s-' + server.replace('_','-') + '-env-type');
+    const srvEnvPathEl = document.getElementById('s-' + server.replace('_','-') + '-env-path');
+    const server_env_type = srvEnvTypeEl ? srvEnvTypeEl.value : '';
+    const server_env_path = srvEnvPathEl ? srvEnvPathEl.value : '';
     const r = await fetch('/api/servers/action', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ server, action })
+      body: JSON.stringify({
+        server, action,
+        py_env_type: gv('s-py-env-type'),
+        py_env_path: gv('s-py-env-path'),
+        server_env_type, server_env_path,
+        extra_args
+      })
     });
     const d = await r.json();
     addMsg('msg-system', '⚙ ' + (d.message || d.error || action));

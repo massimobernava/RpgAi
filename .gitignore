@@ -64,5 +64,12 @@ pipeline_native/
 installer/macos/RpgAi.app/
 installer/macos/app-template/
 
-# Ancora in fase di test
-tts_locale/
+# TTS voice samples — private audio files, not for public repo
+tts_locale/voices/
+tts_locale/voice/
+
+# Generated images from qwen_locale (test outputs)
+qwen_locale/*.png
+
+# Local script copies with spaces in name
+*\ copia.*

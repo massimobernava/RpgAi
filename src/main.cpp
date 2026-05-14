@@ -165,15 +165,23 @@ struct Config {
     int         imgWidth     = 1024;
     int         imgHeight    = 1024;
     int         imgSteps     = 28;
+    int         imgI2iSteps  = 0;     // 0 = use imgSteps; --img-i2i-steps
     float       imgStrength  = 0.75f;
-    std::string imgLora;            // --img-lora
-    float       imgLoraScale = 1.0f; // --img-lora-scale
-    std::string imgLoraModel;       // --i2i-model-lora (default: edit-plus-lora)
+    std::string imgLora;              // --img-lora
+    float       imgLoraScale    = 1.0f; // --img-lora-scale
+    std::string imgLoraModel;         // --i2i-model-lora (default: edit-plus-lora)
+    float       imgGuidanceScale = 1.0f; // --img-guidance-scale
 
     // Face-swap
     std::string faceswapUrl;        // --faceswap-url (empty = disabled)
     std::string pyEnvType = "system"; // system | venv | conda | uv
     std::string pyEnvPath;            // venv dir or conda env name
+    std::string qwenLocaleArgs;       // extra CLI args forwarded on qwen_locale start
+    std::string ttsLocaleArgs;        // extra CLI args forwarded on tts_locale start
+    std::string ttsLocaleEnvType;     // per-server env override (empty = use global)
+    std::string ttsLocaleEnvPath;
+    std::string ttsUrl;               // TTS server base URL (default: http://localhost:8004)
+    std::string ttsNarratorVoice;     // voice_id used for narration (must exist in TTS server voices/)
 
     // Session tracking — set on first save, used to filter images on load
     std::string sessionStart;       // ISO8601 UTC timestamp of first turn in this session
@@ -324,12 +332,20 @@ static json config_to_json() {
     j["img_height"]       = cfg.imgHeight;
     j["img_steps"]        = cfg.imgSteps;
     j["img_strength"]     = cfg.imgStrength;
-    j["img_lora"]         = cfg.imgLora;
-    j["img_lora_scale"]   = cfg.imgLoraScale;
-    j["img_lora_model"]   = cfg.imgLoraModel;
+    j["img_lora"]           = cfg.imgLora;
+    j["img_lora_scale"]     = cfg.imgLoraScale;
+    j["img_lora_model"]     = cfg.imgLoraModel;
+    j["img_i2i_steps"]      = cfg.imgI2iSteps;
+    j["img_guidance_scale"] = cfg.imgGuidanceScale;
     j["faceswap_url"]     = cfg.faceswapUrl;
     j["py_env_type"]      = cfg.pyEnvType;
     j["py_env_path"]      = cfg.pyEnvPath;
+    j["qwen_locale_args"] = cfg.qwenLocaleArgs;
+    j["tts_locale_args"]      = cfg.ttsLocaleArgs;
+    j["tts_locale_env_type"]  = cfg.ttsLocaleEnvType;
+    j["tts_locale_env_path"]  = cfg.ttsLocaleEnvPath;
+    j["tts_url"]              = cfg.ttsUrl;
+    j["tts_narrator_voice"]   = cfg.ttsNarratorVoice;
     j["max_history"]      = cfg.maxHistory;
     j["max_retries"]      = cfg.maxRetries;
     j["save_mode"]        = (cfg.saveMode == SaveMode::FULL) ? "full" : "last";
@@ -382,12 +398,20 @@ static void apply_settings_json(const json& j) {
     gi("img_height",      cfg.imgHeight);
     gi("img_steps",       cfg.imgSteps);
     gf("img_strength",    cfg.imgStrength);
-    gs("img_lora",        cfg.imgLora);
-    gf("img_lora_scale",  cfg.imgLoraScale);
-    gs("img_lora_model",  cfg.imgLoraModel);
+    gs("img_lora",           cfg.imgLora);
+    gf("img_lora_scale",     cfg.imgLoraScale);
+    gs("img_lora_model",     cfg.imgLoraModel);
+    gi("img_i2i_steps",      cfg.imgI2iSteps);
+    gf("img_guidance_scale", cfg.imgGuidanceScale);
     gs("faceswap_url",    cfg.faceswapUrl);
     gs("py_env_type",     cfg.pyEnvType);
     gs("py_env_path",     cfg.pyEnvPath);
+    gs("qwen_locale_args", cfg.qwenLocaleArgs);
+    gs("tts_locale_args",      cfg.ttsLocaleArgs);
+    gs("tts_locale_env_type",  cfg.ttsLocaleEnvType);
+    gs("tts_locale_env_path",  cfg.ttsLocaleEnvPath);
+    gs("tts_url",              cfg.ttsUrl);
+    gs("tts_narrator_voice",   cfg.ttsNarratorVoice);
     gi("max_history",     cfg.maxHistory);
     gi("max_retries",     cfg.maxRetries);
     if (j.contains("save_mode") && j["save_mode"].is_string())
@@ -419,9 +443,11 @@ static void sync_img_cfg_from_config() {
     }
     img_cfg.i2i_url    = cfg.imgI2iUrl;
     img_cfg.i2i_key    = cfg.imgI2iKey;
-    img_cfg.lora_name  = cfg.imgLora;
-    img_cfg.lora_scale = cfg.imgLoraScale;
-    img_cfg.lora_model = cfg.imgLoraModel;
+    img_cfg.lora_name      = cfg.imgLora;
+    img_cfg.lora_scale     = cfg.imgLoraScale;
+    img_cfg.lora_model     = cfg.imgLoraModel;
+    img_cfg.i2i_steps      = cfg.imgI2iSteps;
+    img_cfg.guidance_scale = cfg.imgGuidanceScale;
 }
 
 static bool load_settings_file() {
@@ -1183,10 +1209,13 @@ bool parse_args(int argc, char* argv[]) {
         else if (arg == "--img-strength")  { cfg.imgStrength  = std::stof(next()); }
         else if (arg == "--img-i2i-provider") { cfg.imgI2iProvider = next(); }
         else if (arg == "--img-i2i-url")   { cfg.imgI2iUrl    = next(); }
+        else if (arg == "--tts-url")       { cfg.ttsUrl       = next(); }
         else if (arg == "--img-i2i-key")   { cfg.imgI2iKey    = next(); }
         else if (arg == "--img-lora")       { cfg.imgLora       = next(); }
         else if (arg == "--img-lora-scale") { cfg.imgLoraScale   = std::stof(next()); }
-        else if (arg == "--i2i-model-lora") { cfg.imgLoraModel   = next(); }
+        else if (arg == "--i2i-model-lora")       { cfg.imgLoraModel      = next(); }
+        else if (arg == "--img-i2i-steps")        { cfg.imgI2iSteps       = std::stoi(next()); }
+        else if (arg == "--img-guidance-scale")   { cfg.imgGuidanceScale  = std::stof(next()); }
         else if (arg == "--faceswap-url")  { cfg.faceswapUrl   = next(); }
         else if (arg == "--web")           { cfg.webMode     = true; }
         else if (arg == "--rag")           { cfg.ragFile     = next(); }
@@ -1270,6 +1299,8 @@ int main(int argc, char* argv[]) {
         img_cfg.lora_name         = cfg.imgLora;
         img_cfg.lora_scale        = cfg.imgLoraScale;
         img_cfg.lora_model        = cfg.imgLoraModel;
+        img_cfg.i2i_steps         = cfg.imgI2iSteps;
+        img_cfg.guidance_scale    = cfg.imgGuidanceScale;
         print_system("Image t2i:  provider=" + cfg.imgProvider + " url=" + cfg.imgUrl);
         if (!cfg.imgI2iProvider.empty())
             print_system("Image i2i:  provider=" + cfg.imgI2iProvider
@@ -3027,10 +3058,11 @@ sol::table result = f_result;
                     std::cerr << "[IMG] Mode: regen — bypass cache, fresh collage\n";
 
                 } else if (mode_copy == "refine") {
-                    // Use last cached render as i2i source — bypass cache key check
+                    // Use last cached render as i2i source — bypass cache key check.
+                    // No session filter: same reasoning as fix — find most recent for this scene.
                     bypass_cache = true;
                     base_image_path = scene_cache::lookup_last(
-                        base_copy, script_copy, entries_copy, sess_start_copy);
+                        base_copy, script_copy, entries_copy, "");
                     if (base_image_path.empty())
                         std::cerr << "[IMG] Mode: refine — no cached scene found, "
                                      "falling back to collage\n";
@@ -3039,10 +3071,12 @@ sol::table result = f_result;
                                   << base_image_path << "\n";
 
                 } else if (mode_copy == "fix") {
-                    // User-provided instruction — no LLM prompt, use last cached as base
+                    // User-provided instruction — no LLM prompt, use last cached as base.
+                    // No session filter: fix should find the most recent render for this
+                    // scene regardless of which session generated it.
                     bypass_cache    = true;
                     base_image_path = scene_cache::lookup_last(
-                        base_copy, script_copy, entries_copy, sess_start_copy);
+                        base_copy, script_copy, entries_copy, "");
                     if (base_image_path.empty())
                         throw std::runtime_error(
                             "No cached scene image found. Run /image first.");
@@ -3417,26 +3451,14 @@ sol::table result = f_result;
                 crow::response res(400, "Missing text parameter");
                 return res;
             }
-            // Build TTS server URL
-            std::string tts_url = "http://localhost:8004/tts";
-            std::string sep = "?";
-            auto url_encode = [](const std::string& s) {
-                std::string out;
-                for (unsigned char c : s) {
-                    if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-                        out += c;
-                    } else {
-                        char buf[4];
-                        snprintf(buf, sizeof(buf), "%%%02X", c);
-                        out += buf;
-                    }
-                }
-                return out;
-            };
-            tts_url += sep + "text=" + url_encode(text); sep = "&";
-            if (!voice.empty()) tts_url += sep + "voice=" + url_encode(voice);
+            // POST to TTS server /synthesize with form data
+            std::string base_url = cfg.ttsUrl.empty() ? "http://localhost:8004" : cfg.ttsUrl;
+            std::string tts_url  = base_url + "/synthesize";
+            // URL-encode text so UTF-8 chars (è, à, ì…) survive form-urlencoded transfer
+            char* esc = curl_easy_escape(nullptr, text.c_str(), (int)text.size());
+            std::string form_data = "text=" + std::string(esc) + "&voice_id=" + voice + "&language=it";
+            curl_free(esc);
 
-            // Fetch audio from TTS server via libcurl
             std::vector<uint8_t> audio_bytes;
             CURL* curl = curl_easy_init();
             if (!curl) {
@@ -3444,7 +3466,8 @@ sol::table result = f_result;
                 return res;
             }
             curl_easy_setopt(curl, CURLOPT_URL, tts_url.c_str());
-            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, form_data.c_str());
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
                 +[](char* ptr, size_t sz, size_t nmemb, void* ud) -> size_t {
                     auto* v = static_cast<std::vector<uint8_t>*>(ud);
@@ -3464,6 +3487,38 @@ sol::table result = f_result;
             crow::response res(std::string(audio_bytes.begin(), audio_bytes.end()));
             res.set_header("Content-Type", "audio/wav");
             return res;
+        });
+
+        // -----------------------------------------------------------------
+        // GET /api/tts/voices  →  proxy to TTS server /voices
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/tts/voices")([&](const crow::request& req) {
+            // ?url= overrides saved cfg so user can refresh before hitting Save
+            std::string override_url = req.url_params.get("url") ? req.url_params.get("url") : "";
+            std::string base_url = !override_url.empty() ? override_url
+                                 : (!cfg.ttsUrl.empty()  ? cfg.ttsUrl : "http://localhost:8004");
+            std::string url = base_url + "/voices";
+            std::string body;
+            CURL* curl = curl_easy_init();
+            if (!curl) return crow::response(500, "{\"voices\":[]}");
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+                +[](char* p, size_t s, size_t n, void* u) -> size_t {
+                    static_cast<std::string*>(u)->append(p, s * n);
+                    return s * n;
+                });
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+            long code = 0;
+            curl_easy_perform(curl);
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+            curl_easy_cleanup(curl);
+            if (code == 200 && !body.empty()) {
+                crow::response res(body);
+                res.set_header("Content-Type", "application/json");
+                return res;
+            }
+            return crow::response(502, "{\"voices\":[]}");
         });
 
         // -----------------------------------------------------------------
@@ -3930,8 +3985,11 @@ sol::table result = f_result;
         CROW_ROUTE(app, "/api/servers/status")([&]() {
             json r;
             r["faceswap_locale"] = http_ping("http://localhost:8001/");
-            r["qwen_locale"] = http_ping("http://localhost:8002/");
+            r["qwen_locale"] = http_ping(cfg.imgI2iUrl.empty()
+                                         ? "http://localhost:8000/health"
+                                         : cfg.imgI2iUrl + "/health");
             r["t2i_locale"]  = http_ping("http://localhost:8003/");
+            r["tts_locale"]  = http_ping((cfg.ttsUrl.empty() ? "http://localhost:8004" : cfg.ttsUrl) + "/health");
             r["success"] = true;
             crow::response res(r.dump());
             res.set_header("Content-Type", "application/json");
@@ -3946,15 +4004,26 @@ sol::table result = f_result;
                 std::string server = body.value("server", "");
                 std::string action = body.value("action", "");
 
-                // Derive absolute servers directory from basePath (scripts → workspace → servers)
+                // Per-server env override wins over global env setting.
+                // Fallback chain: server_env_type (request) → cfg per-server → global cfg.
+                std::string srvEnvType = body.value("server_env_type", std::string{});
+                std::string srvEnvPath = body.value("server_env_path", std::string{});
+                if (srvEnvType.empty() && server == "tts_locale") {
+                    srvEnvType = cfg.ttsLocaleEnvType;
+                    srvEnvPath = cfg.ttsLocaleEnvPath;
+                }
+                std::string reqEnvType = srvEnvType.empty() ? body.value("py_env_type", cfg.pyEnvType) : srvEnvType;
+                std::string reqEnvPath = srvEnvType.empty() ? body.value("py_env_path", cfg.pyEnvPath) : srvEnvPath;
+
+                // Derive workspace root from basePath (scripts/ → workspace/)
                 auto srv_base = [&]() -> std::string {
                     namespace fs = std::filesystem;
                     if (!cfg.basePath.empty()) {
                         fs::path bp(cfg.basePath);
                         if (bp.is_absolute())
-                            return bp.parent_path().parent_path().string() + "/servers/";
+                            return bp.parent_path().parent_path().string() + "/";
                     }
-                    return "servers/";
+                    return "./";
                 }();
 
                 std::string script_path, log_file, pip_deps;
@@ -3965,11 +4034,19 @@ sol::table result = f_result;
                 } else if (server == "qwen_locale") {
                     script_path = srv_base + "qwen_locale/server_locale.py";
                     log_file    = "/tmp/rpgai_qwen.log";
-                    pip_deps    = "diffusers torch transformers accelerate fastapi uvicorn pillow";
+                    pip_deps    = "diffusers torch transformers accelerate peft bitsandbytes huggingface_hub fastapi uvicorn pillow python-multipart";
                 } else if (server == "t2i_locale") {
                     script_path = srv_base + "t2i_locale/server.py";
                     log_file    = "/tmp/rpgai_t2i.log";
                     pip_deps    = "diffusers torch transformers accelerate fastapi uvicorn pillow pydantic";
+                } else if (server == "tts_locale") {
+                    script_path = srv_base + "tts_locale/server.py";
+                    log_file    = "/tmp/rpgai_tts.log";
+                    // transformers pinned <4.37: BeamSearchScorer removed from public API in 4.37+.
+                    // After install, run tts_locale/patch_tts_compat.py to fix torch.load weights_only
+                    // and BeamSearchScorer import — Coqui TTS is unmaintained and incompatible with
+                    // modern PyTorch/transformers without these patches.
+                    pip_deps    = "transformers==4.36.2 TTS torchaudio soundfile numpy fastapi uvicorn python-multipart";
                 } else {
                     result["success"] = false;
                     result["error"]   = "Unknown server: " + server;
@@ -3980,21 +4057,21 @@ sol::table result = f_result;
 
                 // Build python/pip invocation from configured environment.
                 auto py_cmd = [&]() -> std::string {
-                    if (cfg.pyEnvType == "venv")  return cfg.pyEnvPath + "/bin/python3";
-                    if (cfg.pyEnvType == "conda") {
-                        std::string env = cfg.pyEnvPath.empty() ? "rpgai" : cfg.pyEnvPath;
+                    if (reqEnvType == "venv")  return reqEnvPath + "/bin/python3";
+                    if (reqEnvType == "conda") {
+                        std::string env = reqEnvPath.empty() ? "rpgai" : reqEnvPath;
                         return "conda run -n " + env + " python";
                     }
-                    if (cfg.pyEnvType == "uv")    return "uv run python";
+                    if (reqEnvType == "uv")    return "uv run python";
                     return "python3";
                 };
                 auto pip_cmd = [&]() -> std::string {
-                    if (cfg.pyEnvType == "venv")  return cfg.pyEnvPath + "/bin/pip";
-                    if (cfg.pyEnvType == "conda") {
-                        std::string env = cfg.pyEnvPath.empty() ? "rpgai" : cfg.pyEnvPath;
+                    if (reqEnvType == "venv")  return reqEnvPath + "/bin/pip";
+                    if (reqEnvType == "conda") {
+                        std::string env = reqEnvPath.empty() ? "rpgai" : reqEnvPath;
                         return "conda run -n " + env + " pip";
                     }
-                    if (cfg.pyEnvType == "uv")    return "uv pip";
+                    if (reqEnvType == "uv")    return "uv pip";
                     return "pip3";
                 };
                 // On Linux, system Python is often "externally managed" — pass the override flag.
@@ -4006,7 +4083,20 @@ sol::table result = f_result;
                 }();
 
                 if (action == "start") {
-                    std::string cmd = "nohup " + py_cmd() + " " + script_path + " > " + log_file + " 2>&1 &";
+                    namespace fs = std::filesystem;
+                    std::string cfg_args = (server == "qwen_locale") ? cfg.qwenLocaleArgs
+                                         : (server == "tts_locale")  ? cfg.ttsLocaleArgs
+                                         : std::string{};
+                    std::string extra_args = body.value("extra_args", cfg_args);
+                    // Strip shell metacharacters — args field is trusted (local admin UI)
+                    // but prevent accidental injection from copy-paste.
+                    for (char c : {'\'', '"', '`', ';', '&', '|', '(', ')', '<', '>'})
+                        extra_args.erase(std::remove(extra_args.begin(), extra_args.end(), c), extra_args.end());
+
+                    std::string srv_dir = fs::path(script_path).parent_path().string();
+                    std::string srv_script = fs::path(script_path).filename().string();
+                    std::string args_part = extra_args.empty() ? "" : " " + extra_args;
+                    std::string cmd = "nohup bash -c 'cd \"" + srv_dir + "\" && " + py_cmd() + " " + srv_script + args_part + "' > " + log_file + " 2>&1 &";
                     system(cmd.c_str());
                     result["success"] = true;
                     result["message"] = "Starting " + server + " — log: " + log_file;
@@ -4017,8 +4107,8 @@ sol::table result = f_result;
                     result["message"] = "Stop signal sent to " + server;
                 } else if (action == "install") {
                     std::string cmd;
-                    if (cfg.pyEnvType == "conda") {
-                        std::string env = cfg.pyEnvPath.empty() ? "rpgai" : cfg.pyEnvPath;
+                    if (reqEnvType == "conda") {
+                        std::string env = reqEnvPath.empty() ? "rpgai" : reqEnvPath;
                         // Create env if missing, then install deps
                         cmd = "nohup bash -c \"(conda env list | grep -q '^" + env + " ' || conda create -n " + env + " python=3.10 -y) && conda run -n " + env + " pip install " + pip_deps + "\" > " + log_file + " 2>&1 &";
                     } else {

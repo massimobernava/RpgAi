@@ -104,6 +104,11 @@ struct ImageConfig {
     int           poll_interval_ms = 2000;   // ms tra un poll e l'altro per SDCPP
     int           poll_timeout_s   = 120;    // timeout totale generazione
 
+    float         guidance_scale = 1.0f;  // i2i denoising guidance (qwen_local: 1.0, cloud: 4.5-7.5)
+    int           i2i_steps = 0;          // 0 = use steps; if >0 overrides steps for i2i only
+
+    int effective_i2i_steps() const { return i2i_steps > 0 ? i2i_steps : steps; }
+
     // LoRA — local name (qwen_local) or https:// URL (WaveSpeed, other cloud providers)
     std::string   lora_name;      // local subfolder or https:// URL
     float         lora_scale    = 1.0f;
@@ -274,7 +279,8 @@ static std::vector<uint8_t> http_post_multipart_raw(
         const std::string&        lora_name,
         float                     lora_scale,
         int                       steps,
-        float                     strength) {
+        float                     strength,
+        float                     guidance_scale = 1.0f) {
 
     CURL* curl = curl_easy_init();
     if (!curl) throw std::runtime_error("[IMG] curl_easy_init failed");
@@ -294,6 +300,7 @@ static std::vector<uint8_t> http_post_multipart_raw(
 
     std::string steps_str    = std::to_string(steps);
     std::string strength_str = std::to_string(strength);
+    std::string gs_str       = std::to_string(guidance_scale);
 
     p = curl_mime_addpart(form);
     curl_mime_name(p, "steps");
@@ -302,6 +309,10 @@ static std::vector<uint8_t> http_post_multipart_raw(
     p = curl_mime_addpart(form);
     curl_mime_name(p, "strength");
     curl_mime_data(p, strength_str.c_str(), CURL_ZERO_TERMINATED);
+
+    p = curl_mime_addpart(form);
+    curl_mime_name(p, "guidance_scale");
+    curl_mime_data(p, gs_str.c_str(), CURL_ZERO_TERMINATED);
 
     if (!lora_name.empty()) {
         std::string scale_str = std::to_string(lora_scale);
@@ -318,7 +329,7 @@ static std::vector<uint8_t> http_post_multipart_raw(
     curl_easy_setopt(curl, CURLOPT_MIMEPOST,      form);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_bytes_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &result);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       180L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       300L);  // 300s: torch.compile warm-up can be slow
 
     CURLcode rc = curl_easy_perform(curl);
     curl_mime_free(form);
@@ -677,9 +688,12 @@ inline std::string lookup(const std::string& base_path,
     constexpr long long TOL = 3600;
     for (const auto& entry : db) {
         if (entry.value("cache_key", "") != cache_key) continue;
-        // Session filter: ignore cache hits from a different (older) session
+        // Session filter: ignore cache hits from a different (older) session.
+        // Prefer utc_at (ISO8601, always UTC) over generated_at (YYYYMMDD_HHMMSS,
+        // parsed as local time by ts_to_utc_seconds — wrong in non-UTC timezones).
         if (start_sec >= 0) {
-            long long img_sec = ts_to_utc_seconds(entry.value("generated_at", ""));
+            std::string ts = entry.value("utc_at", entry.value("generated_at", ""));
+            long long img_sec = ts_to_utc_seconds(ts);
             if (img_sec >= 0 && img_sec < start_sec - TOL) continue;
         }
         std::string img = entry.value("image_path", "");
@@ -717,9 +731,12 @@ inline std::string lookup_last(const std::string& base_path,
         const auto& entry = db[i];
         if (entry.value("script", "") != script) continue;
 
-        // Session filter: skip entries from a previous session
+        // Session filter: skip entries from a previous session.
+        // Prefer utc_at (ISO8601, always UTC) over generated_at (YYYYMMDD_HHMMSS,
+        // parsed as local time by ts_to_utc_seconds — wrong in non-UTC timezones).
         if (start_sec >= 0) {
-            long long img_sec = ts_to_utc_seconds(entry.value("generated_at", ""));
+            std::string ts = entry.value("utc_at", entry.value("generated_at", ""));
+            long long img_sec = ts_to_utc_seconds(ts);
             if (img_sec >= 0 && img_sec < start_sec - TOL) continue;
         }
 
@@ -931,7 +948,7 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
     req["init_image"]   = b64;
     req["batch_count"]  = 1;
     req["output_format"] = "png";
-    req["sample_params"]["sample_steps"] = img_cfg.steps;
+    req["sample_params"]["sample_steps"] = img_cfg.effective_i2i_steps();
     if (!img_cfg.i2i_model.empty())
         req["model"] = img_cfg.i2i_model;
 
@@ -1189,7 +1206,7 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
     json req;
     req["prompt"]              = prompt;
     req["image_url"]           = data_url;
-    req["num_inference_steps"] = img_cfg.steps;
+    req["num_inference_steps"] = img_cfg.effective_i2i_steps();
     req["guidance_scale"]      = 4.5;
 
     std::string resp = img_detail::http_post_json(url, req.dump(), auth_header());
@@ -1627,7 +1644,8 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
 namespace qwen_local {
 
 inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
-                                     const std::string& prompt) {
+                                     const std::string& prompt,
+                                     bool apply_lora = false) {
     std::string url = img_cfg.i2i_url.empty()
         ? (img_cfg.url.empty() ? "http://127.0.0.1:8000" : img_cfg.url)
         : img_cfg.i2i_url;
@@ -1638,16 +1656,18 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
 
     std::cerr << "[IMG] qwen_local POST " << url
               << "  strength=" << img_cfg.strength
-              << "  steps=" << img_cfg.steps << "\n";
+              << "  steps=" << img_cfg.effective_i2i_steps()
+              << "  gs=" << img_cfg.guidance_scale << "\n";
 
     std::vector<uint8_t> result = img_detail::http_post_multipart_raw(
         url,
         prompt,
         collage_bytes,
-        img_cfg.lora_name,
+        apply_lora ? img_cfg.lora_name : "",   // LoRA only on explicit /image lora
         img_cfg.lora_scale,
-        img_cfg.steps,
-        img_cfg.strength
+        img_cfg.effective_i2i_steps(),
+        img_cfg.strength,
+        img_cfg.guidance_scale
     );
 
     if (result.empty())
@@ -1859,7 +1879,7 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
             }
             break;
         }
-        case ImageProvider::QWEN_LOCAL:      result = qwen_local::img2img(i2i_source, prompt);      break;
+        case ImageProvider::QWEN_LOCAL:      result = qwen_local::img2img(i2i_source, prompt, apply_lora); break;
         default:                             result = sdcpp::img2img(i2i_source, prompt);            break;
     }
 
