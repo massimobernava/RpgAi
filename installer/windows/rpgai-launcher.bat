@@ -22,8 +22,8 @@ if not exist "%WORKSPACE%\rpgai_settings.json" set FIRST_RUN=1
 cd /d "%WORKSPACE%"
 start "" "%INSTDIR%rpgai.exe" ^
     --web ^
-    --path "%WORKSPACE%\scripts\" ^
-    --save-path "%WORKSPACE%\saves\"
+    --path "%WORKSPACE%\scripts" ^
+    --save-path "%WORKSPACE%\saves"
 
 :: Wait for server ready (poll up to 15 s)
 set /a TRIES=0
