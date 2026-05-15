@@ -244,8 +244,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          # Copy only libcurl — libgcc/libstdc++/winpthread are statically linked
-          cp /mingw64/bin/libcurl-4.dll installer/windows/
+          # Automatically copy all MinGW DLLs required by rpgai.exe
+          ldd build/rpgai.exe \
+            | grep '/mingw64/bin' \
+            | awk '{print $3}' \
+            | xargs -I{} cp {} installer/windows/
 
       - name: Package (Windows .exe installer)
         if: runner.os == 'Windows'
