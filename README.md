@@ -19,6 +19,8 @@ Whether you want to recreate a classic D&D dungeon crawl, build an interactive m
 
 ![RpgAi web UI — scene image, narration and HUD](docs/screenshot.png)
 
+▶ **[Watch the demo on YouTube](https://youtu.be/zeZxTmyhi08)**
+
 ---
 
 ## ✨ Features

@@ -36,6 +36,7 @@ Section "RpgAi" SecMain
     ; Install executable and launcher
     SetOutPath "$INSTDIR"
     File "rpgai.exe"
+    File "libcurl-4.dll"
     File "rpgai-launcher.bat"
     File "getting_started.html"
 
@@ -104,6 +105,7 @@ SectionEnd
 ; ── Uninstall ────────────────────────────────────────────────────────────────
 Section "Uninstall"
     Delete "$INSTDIR\rpgai.exe"
+    Delete "$INSTDIR\libcurl-4.dll"
     Delete "$INSTDIR\rpgai-launcher.bat"
     Delete "$INSTDIR\getting_started.html"
     Delete "$INSTDIR\Uninstall.exe"

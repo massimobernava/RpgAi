@@ -99,6 +99,10 @@ endif()
 if(WIN32)
     target_compile_definitions(rpgai PRIVATE _WIN32_WINNT=0x0602)
     target_link_libraries(rpgai PRIVATE ws2_32 mswsock)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_options(rpgai PRIVATE -static-libgcc -static-libstdc++ -static-libgcc)
+        target_link_libraries(rpgai PRIVATE -static winpthread)
+    endif()
 endif()
 
 # ===========================================================================

@@ -240,6 +240,13 @@ jobs:
         shell: powershell
         run: choco install nsis --yes --no-progress
 
+      - name: Copy runtime DLLs (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          # Copy only libcurl — libgcc/libstdc++/winpthread are statically linked
+          cp /mingw64/bin/libcurl-4.dll installer/windows/
+
       - name: Package (Windows .exe installer)
         if: runner.os == 'Windows'
         shell: powershell
