@@ -21,8 +21,12 @@
 #include <crow/crow_all.h>
 #include <filesystem>
 #include <thread>
+#include <csignal>
+#include <atomic>
 
 using nlohmann::json;
+
+static std::atomic<bool> g_shutdown{false};
 
 static bool ansi_enabled = false;
 
@@ -659,6 +663,20 @@ static std::string utc_timestamp() {
     return buf;
 }
 
+static std::string local_session_id() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_loc{};
+#ifdef _WIN32
+    localtime_s(&tm_loc, &t);
+#else
+    localtime_r(&t, &tm_loc);
+#endif
+    char buf[12];
+    std::strftime(buf, sizeof(buf), "%m%d_%H%M", &tm_loc);
+    return buf;
+}
+
 static json build_turn_json(const std::string& player_input,
                              const std::string& llm_response,
                              const std::string& narration,
@@ -783,7 +801,7 @@ static json load_turns_for_replay(const std::string& filename) {
         for (const auto& l : lines) {
             try {
                 auto j = json::parse(l);
-                std::string narr = j.value("narration", "");
+                std::string narr = j.value("narration", j.value("narrative", ""));
                 if (narr.empty()) continue;
                 json t;
                 t["player_input"] = j.value("player_input", "");
@@ -804,10 +822,13 @@ static json load_turns_for_replay(const std::string& filename) {
                         pending_player = msg.value("content", "");
                     } else if (role == "assistant" && pid == "gm") {
                         std::string narr;
+                        std::string raw_content = msg.value("content", "");
                         try {
-                            auto jc = json::parse(msg.value("content", "{}"));
-                            narr = jc.value("narration", "");
-                        } catch (...) {}
+                            auto jc = json::parse(raw_content);
+                            narr = jc.value("narration", jc.value("narrative", ""));
+                        } catch (...) {
+                            narr = raw_content; // plain text (tool-calling without JSON output)
+                        }
                         if (!narr.empty()) {
                             json t;
                             t["player_input"] = pending_player;
@@ -1043,6 +1064,9 @@ static std::string query_llm_with_tools(
         case AIProvider::CLAUDE:
             return claude_tool_loop(sys_prompt, history, user_prompt, model,
                 tools, executor, max_iter);
+        case AIProvider::OLLAMA:
+            return openai_tool_loop(cfg.ollama_baseUrl + "/v1/chat/completions", "", model,
+                sys_prompt, history, user_prompt, json_schema, tools, executor, max_iter);
         default:
             std::cerr << "[TOOLS] Provider doesn't support tool calling; falling back to schema mode\n";
             return query_llm(provider, sys_prompt, history, user_prompt, json_schema, model);
@@ -1329,15 +1353,18 @@ int main(int argc, char* argv[]) {
         print_system("EMBED: Model: " + cfg.embedModel + " (" + effective_embed_provider() + ")");
     std::cout << "\n";
 
+    std::signal(SIGINT, [](int) { g_shutdown = true; });
+
     curl_global_init(CURL_GLOBAL_ALL);
 
     // --- Lua setup ---
     sol::state lua;
     lua.open_libraries(sol::lib::base, sol::lib::package, sol::lib::string,
-                       sol::lib::table, sol::lib::math, sol::lib::os,sol::lib::debug);
+                       sol::lib::table, sol::lib::math, sol::lib::os, sol::lib::io,
+                       sol::lib::debug);
     const std::string lua_default_path = lua["package"]["path"].get<std::string>();
     auto update_lua_path = [&]() {
-        lua["package"]["path"] = cfg.basePath + "lib/?.lua;" + lua_default_path;
+        lua["package"]["path"] = cfg.basePath + "?.lua;" + cfg.basePath + "lib/?.lua;" + lua_default_path;
     };
     update_lua_path();
 
@@ -1384,7 +1411,9 @@ int main(int argc, char* argv[]) {
         [&](const std::string& sys_prompt,
             const std::string& history_json,
             const std::string& user_prompt,
-            const std::string& schema) -> std::string {
+            const std::string& schema,
+            sol::optional<std::string> model_override,
+            sol::optional<std::string> provider_override) -> std::string {
 
             std::vector<Message> lua_history;
             try {
@@ -1398,9 +1427,108 @@ int main(int argc, char* argv[]) {
                         });
             } catch (...) {}
 
-            return ::query_llm(cfg.provider, with_lang(sys_prompt), lua_history,
-                               user_prompt, schema, cfg.activeModel());
+            std::string model       = model_override.value_or(cfg.activeModel());
+            AIProvider  provider    = cfg.provider;
+            if (provider_override.has_value() && !provider_override->empty())
+                provider = provider_from_string(*provider_override);
+            return ::query_llm(provider, with_lang(sys_prompt), lua_history,
+                               user_prompt, schema, model);
         });
+
+    // ------------------------------------------------------------------
+    // query_llm_async / query_llm_poll — non-blocking LLM calls from Lua.
+    //
+    // Designed for off-screen NPC ambient events: the script fires a call,
+    // continues the current turn, and harvests results in a later turn.
+    // The background thread touches ONLY C++ data (never the Lua state).
+    //
+    // Lua signatures:
+    //   local job_id = query_llm_async(sys, history_json, user, schema
+    //                                  [, model [, provider]])  → string
+    //   local result = query_llm_poll(job_id)  → string (done) | nil (pending) | false (error)
+    // ------------------------------------------------------------------
+    {
+        struct LlmJob {
+            enum class State { PENDING, DONE, ERROR } state = State::PENDING;
+            std::string result;
+            std::string error;
+        };
+        auto llm_jobs         = std::make_shared<std::map<std::string, LlmJob>>();
+        auto llm_jobs_mutex   = std::make_shared<std::mutex>();
+        auto llm_job_counter  = std::make_shared<std::atomic<int>>(0);
+
+        lua.set_function("query_llm_async",
+            [&, llm_jobs, llm_jobs_mutex, llm_job_counter](
+                const std::string& sys_prompt,
+                const std::string& history_json,
+                const std::string& user_prompt,
+                const std::string& schema,
+                sol::optional<std::string> model_override,
+                sol::optional<std::string> provider_override) -> std::string {
+
+                std::string job_id = "llmjob_" + std::to_string(++(*llm_job_counter));
+
+                {
+                    std::lock_guard<std::mutex> lk(*llm_jobs_mutex);
+                    (*llm_jobs)[job_id] = LlmJob{};
+                }
+
+                std::string model     = model_override.value_or(cfg.activeModel());
+                AIProvider  provider  = cfg.provider;
+                if (provider_override.has_value() && !provider_override->empty())
+                    provider = provider_from_string(*provider_override);
+
+                std::vector<Message> lua_history;
+                try {
+                    auto jarr = json::parse(history_json);
+                    if (jarr.is_array())
+                        for (auto& item : jarr)
+                            lua_history.push_back({
+                                item.value("role", "user"),
+                                item.value("content", ""),
+                                item.value("player_id", "")
+                            });
+                } catch (...) {}
+
+                std::thread([llm_jobs, llm_jobs_mutex, job_id,
+                             provider, sys_prompt, lua_history, user_prompt, schema, model]() {
+                    try {
+                        std::string res = ::query_llm(provider, sys_prompt, lua_history,
+                                                      user_prompt, schema, model);
+                        std::lock_guard<std::mutex> lk(*llm_jobs_mutex);
+                        (*llm_jobs)[job_id].result = std::move(res);
+                        (*llm_jobs)[job_id].state  = LlmJob::State::DONE;
+                    } catch (const std::exception& ex) {
+                        std::lock_guard<std::mutex> lk(*llm_jobs_mutex);
+                        (*llm_jobs)[job_id].error  = ex.what();
+                        (*llm_jobs)[job_id].state  = LlmJob::State::ERROR;
+                    }
+                }).detach();
+
+                return job_id;
+            });
+
+        lua.set_function("query_llm_poll",
+            [llm_jobs, llm_jobs_mutex](sol::this_state L,
+                                       const std::string& job_id) -> sol::object {
+                std::lock_guard<std::mutex> lk(*llm_jobs_mutex);
+                auto it = llm_jobs->find(job_id);
+                if (it == llm_jobs->end()) return sol::lua_nil;
+
+                auto& job = it->second;
+                if (job.state == LlmJob::State::PENDING) return sol::lua_nil;
+
+                sol::state_view sv(L);
+                if (job.state == LlmJob::State::ERROR) {
+                    llm_jobs->erase(it);
+                    return sol::make_object(sv, false);
+                }
+                // DONE: return result string and clean up
+                std::string res = std::move(job.result);
+                llm_jobs->erase(it);
+                return sol::make_object(sv, res);
+            });
+    }
 
     // ------------------------------------------------------------------
     // get_embedding exposed to Lua — returns a Lua table of floats.
@@ -1437,6 +1565,13 @@ int main(int argc, char* argv[]) {
             return cosine_similarity(va, vb);
         });
 
+    lua.set_function("get_pinned_scene_path",
+        [&](const std::string& key) -> sol::optional<std::string> {
+            auto path = pin_cache::lookup(cfg.basePath, key);
+            if (path.empty()) return sol::nullopt;
+            return path;
+        });
+
     // composite_images exposed to Lua — alpha-blend a stack of PNG layers into one file.
     // Lua signature:
     //   local ok, err = composite_images(layers_table, output_rel_path)
@@ -1446,11 +1581,32 @@ int main(int argc, char* argv[]) {
     //   Canvas dimensions are taken from the first layer (must be a plain string path).
     //   output_rel_path: destination relative to --path base dir
     //   returns: true, "" on success | false, errmsg on failure
+    // composite_images — alpha-blend a stack of PNG layers into one output file.
+    //
+    // Lua signatures (all backward-compatible):
+    //   composite_images(layers, out_path)
+    //
+    // Each entry in layers can be:
+    //   "path/to/file.png"
+    //       → resize to canvas size, place at (0,0), no transforms
+    //   { path="...", x=0, y=0 }
+    //       → natural size, place at pixel offset (x,y)
+    //   { path="...", x=129, y=144, xzoom=-0.76, yzoom=0.76, alpha=1.0 }
+    //       → full transform: scale by (|xzoom|,|yzoom|), flip if negative, global alpha
+    //
+    // Canvas size comes from the first layer (must be loadable).
+    // xzoom/yzoom: 1.0 = natural size; negative = mirror that axis; 0 = skip
+    // alpha: [0,1] global opacity multiplier applied before compositing
     lua.set_function("composite_images",
         [&](sol::table layers_tbl, const std::string& out_rel) -> std::tuple<bool, std::string> {
             namespace fs = std::filesystem;
 
-            struct Layer { std::string path; int x = 0, y = 0; bool positioned = false; };
+            struct Layer {
+                std::string path;
+                int   x = 0, y = 0;
+                float xzoom = 0.0f, yzoom = 0.0f; // 0 = full-canvas resize; non-zero = explicit scale
+                float alpha = 1.0f;
+            };
 
             try {
                 fs::path base(cfg.basePath);
@@ -1460,14 +1616,19 @@ int main(int argc, char* argv[]) {
                 std::vector<Layer> layers;
                 for (auto& kv : layers_tbl) {
                     if (kv.second.get_type() == sol::type::string) {
-                        layers.push_back({ (base / kv.second.as<std::string>()).string(), 0, 0, false });
+                        // plain string → full-canvas layer
+                        layers.push_back({ (base / kv.second.as<std::string>()).string() });
                     } else if (kv.second.get_type() == sol::type::table) {
                         sol::table t = kv.second.as<sol::table>();
                         Layer l;
-                        l.path       = (base / t.get_or<std::string>("path", "")).string();
-                        sol::optional<int> ox = t["x"]; l.x = ox ? *ox : 0;
-                        sol::optional<int> oy = t["y"]; l.y = oy ? *oy : 0;
-                        l.positioned = true;
+                        l.path  = (base / t.get_or<std::string>("path", "")).string();
+                        l.x     = t.get_or("x",     0);
+                        l.y     = t.get_or("y",     0);
+                        l.alpha = t.get_or("alpha", 1.0f);
+                        // zoom shortcuts: "zoom" sets both axes uniformly
+                        float zoom = t.get_or("zoom", 0.0f);
+                        l.xzoom   = t.get_or("xzoom", zoom);
+                        l.yzoom   = t.get_or("yzoom", zoom);
                         if (!l.path.empty()) layers.push_back(l);
                     }
                 }
@@ -1485,7 +1646,10 @@ int main(int argc, char* argv[]) {
 
                 std::vector<uint8_t> canvas(W * H * 4, 0);
 
-                auto blend_region = [&](const stbi_uc* src, int src_w, int src_h, int ox, int oy) {
+                // Alpha-composite src region onto canvas at (ox, oy).
+                // layer_alpha: per-layer global opacity multiplier.
+                auto blend_region = [&](const uint8_t* src, int src_w, int src_h,
+                                        int ox, int oy, float layer_alpha) {
                     for (int sy = 0; sy < src_h; ++sy) {
                         int dy = oy + sy;
                         if (dy < 0 || dy >= H) continue;
@@ -1494,7 +1658,7 @@ int main(int argc, char* argv[]) {
                             if (dx < 0 || dx >= W) continue;
                             int si = (sy * src_w + sx) * 4;
                             int di = (dy * W + dx) * 4;
-                            float sa = src[si+3] / 255.0f;
+                            float sa = (src[si+3] / 255.0f) * layer_alpha;
                             float da = canvas[di+3] / 255.0f;
                             float oa = sa + da * (1.0f - sa);
                             if (oa > 0.0f) {
@@ -1507,23 +1671,71 @@ int main(int argc, char* argv[]) {
                     }
                 };
 
+                // Flip pixels horizontally in-place (mirror around vertical axis).
+                auto flip_x = [](uint8_t* px, int w, int h) {
+                    for (int y = 0; y < h; ++y) {
+                        uint8_t* row = px + y * w * 4;
+                        for (int x = 0; x < w / 2; ++x) {
+                            uint8_t* a = row + x * 4;
+                            uint8_t* b = row + (w - 1 - x) * 4;
+                            for (int c = 0; c < 4; ++c) std::swap(a[c], b[c]);
+                        }
+                    }
+                };
+
+                // Flip pixels vertically in-place.
+                auto flip_y = [](uint8_t* px, int w, int h) {
+                    for (int y = 0; y < h / 2; ++y) {
+                        uint8_t* top = px + y * w * 4;
+                        uint8_t* bot = px + (h - 1 - y) * w * 4;
+                        for (int x = 0; x < w * 4; ++x) std::swap(top[x], bot[x]);
+                    }
+                };
+
                 for (const auto& layer : layers) {
                     int w, h, ch;
                     stbi_uc* img = stbi_load(layer.path.c_str(), &w, &h, &ch, 4);
-                    if (!img) { std::cerr << "[COMPOSITE] skip: " << layer.path << "\n"; continue; }
+                    if (!img) {
+                        std::cerr << "[COMPOSITE] skip: " << layer.path
+                                  << " — " << stbi_failure_reason() << "\n";
+                        continue;
+                    }
 
-                    if (layer.positioned) {
-                        // Natural size, blitted at (x,y)
-                        blend_region(img, w, h, layer.x, layer.y);
-                    } else {
-                        // Full-canvas: resize to (W,H) then blit at (0,0)
+                    bool has_zoom = (layer.xzoom != 0.0f || layer.yzoom != 0.0f);
+
+                    if (!has_zoom && layer.x == 0 && layer.y == 0) {
+                        // Full-canvas mode: resize to (W,H), blit at (0,0)
                         if (w != W || h != H) {
                             std::vector<uint8_t> buf(W * H * 4);
                             stbir_resize_uint8_linear(img, w, h, 0, buf.data(), W, H, 0, STBIR_RGBA);
-                            blend_region(buf.data(), W, H, 0, 0);
+                            blend_region(buf.data(), W, H, 0, 0, layer.alpha);
                         } else {
-                            blend_region(img, W, H, 0, 0);
+                            blend_region(img, W, H, 0, 0, layer.alpha);
                         }
+                    } else {
+                        // Positioned mode: apply optional scale/flip, then blit at (x,y)
+                        std::vector<uint8_t> work;
+                        int dst_w = w, dst_h = h;
+
+                        float sx = has_zoom ? std::abs(layer.xzoom) : 1.0f;
+                        float sy = has_zoom ? std::abs(layer.yzoom) : 1.0f;
+                        bool do_flip_x = has_zoom && (layer.xzoom < 0.0f);
+                        bool do_flip_y = has_zoom && (layer.yzoom < 0.0f);
+
+                        if (sx != 1.0f || sy != 1.0f) {
+                            dst_w = std::max(1, static_cast<int>(std::round(w * sx)));
+                            dst_h = std::max(1, static_cast<int>(std::round(h * sy)));
+                            work.resize(dst_w * dst_h * 4);
+                            stbir_resize_uint8_linear(img, w, h, 0,
+                                                      work.data(), dst_w, dst_h, 0, STBIR_RGBA);
+                        } else {
+                            work.assign(img, img + w * h * 4);
+                        }
+
+                        if (do_flip_x) flip_x(work.data(), dst_w, dst_h);
+                        if (do_flip_y) flip_y(work.data(), dst_w, dst_h);
+
+                        blend_region(work.data(), dst_w, dst_h, layer.x, layer.y, layer.alpha);
                     }
                     stbi_image_free(img);
                 }
@@ -1601,8 +1813,9 @@ int main(int argc, char* argv[]) {
     // ===========================================================================
     bool running = !cfg.webMode;
 
-    while (running) {
+    while (running && !g_shutdown) {
         std::string player_input = read_input("❯ ");
+        if (g_shutdown) break;
         if (player_input.empty()) continue;
 
         // ------------------------------------------------------------------
@@ -1778,8 +1991,9 @@ int main(int argc, char* argv[]) {
                         chat_history.pop_back();
                         chat_history.pop_back();
                     }
-                    chat_history.push_back({"user",      last_player_input, "player"});
-                    chat_history.push_back({"assistant", fix_reply,         "gm"});
+                    std::string cfix_ts = utc_timestamp();
+                    chat_history.push_back({"user",      last_player_input, "player", ""});
+                    chat_history.push_back({"assistant", fix_reply,         "gm",     cfix_ts});
                     last_llm_reply = fix_reply;
 
                     std::string state_after = lua["get_state_snapshot"]();
@@ -1919,6 +2133,11 @@ int main(int argc, char* argv[]) {
         // LLM call with retry
         print_thinking();
         bool turn_ok = false;
+        if (script_has_tools) {
+            static int tool_turn = 0;
+            std::cerr << "\033[2m── TURNO " << ++tool_turn
+                      << " ──────────────────────────────────────\033[0m\n";
+        }
         for (int attempt = 0; attempt < cfg.maxRetries && !turn_ok; ++attempt) {
             if (attempt > 0)
                 print_warning("Retry " + std::to_string(attempt) +
@@ -1964,8 +2183,9 @@ sol::table result = f_result;
                 last_llm_reply    = llm_reply;
                 last_player_input = player_input;
 
-                chat_history.push_back({"user",      player_input, "player"});
-                chat_history.push_back({"assistant", llm_reply,    "gm"});
+                std::string cons_ts = utc_timestamp();
+                chat_history.push_back({"user",      player_input, "player", ""});
+                chat_history.push_back({"assistant", llm_reply,    "gm",     cons_ts});
 
                 std::string state_after = lua["get_state_snapshot"]();
                 write_turn(cfg.saveFile, full_stream, cfg.saveMode,
@@ -2019,6 +2239,10 @@ sol::table result = f_result;
         std::string web_last_llm_reply;
         std::string web_last_player_input;
 
+        // Undo stack: stores (lua_snapshot, chat_history) before each turn.
+        std::deque<std::pair<std::string, std::vector<Message>>> undo_stack;
+        constexpr size_t MAX_UNDO_STEPS = 10;
+
         // Resolves the full path for a save file.
         // Uses savePath as directory if set, otherwise current working directory.
         auto resolve_save_path = [&](const std::string& filename) -> std::string {
@@ -2062,6 +2286,41 @@ sol::table result = f_result;
             json result_json;
             result_json["success"] = false;
 
+            // Hook: before_ai_turn(player_input) — optional.
+            // If it returns {skip_llm=true, narration="..."} the LLM call is skipped entirely.
+            // The hook may modify Lua state directly before returning.
+            sol::protected_function bat_fn = lua["before_ai_turn"];
+            if (bat_fn.valid()) {
+                sol::protected_function_result bat_r = bat_fn(player_input);
+                if (bat_r.valid() && bat_r.get_type() == sol::type::table) {
+                    sol::table bt = bat_r;
+                    if (bt.get_or("skip_llm", false)) {
+                        std::string pre_narr = bt.get_or<std::string>("narration", "");
+                        std::string pre_snap = lua["get_state_snapshot"]();
+                        std::string turn_ts  = utc_timestamp();
+                        hist.push_back({"user",      player_input, "player", ""});
+                        hist.push_back({"assistant", pre_narr,     "gm",     turn_ts});
+                        write_turn(resolve_save_path(cfg.saveFile), fstream, cfg.saveMode,
+                                   player_input, pre_narr, pre_narr, pre_snap, hist);
+                        web_last_llm_reply    = pre_narr;
+                        web_last_player_input = player_input;
+                        result_json["success"]           = true;
+                        result_json["narration"]         = pre_narr;
+                        result_json["display"]           = lua["get_display_state"]().get<std::string>();
+                        result_json["game_over"]         = false;
+                        result_json["suggested_actions"] = json::array();
+                        result_json["actions"]           = json::array();
+                        result_json["game_over_reason"]  = "";
+                        return result_json;
+                    }
+                }
+            }
+
+            if (script_has_tools) {
+                static int web_tool_turn = 0;
+                std::cerr << "\033[2m── TURNO " << ++web_tool_turn
+                          << " ──────────────────────────────────────\033[0m\n";
+            }
             for (int attempt = 0; attempt < cfg.maxRetries; ++attempt) {
                 auto trimmed  = trim_history(hist, cfg.maxHistory);
                 std::string reply = script_has_tools
@@ -2131,14 +2390,21 @@ sol::table result = f_result;
                     }
                 }
 
-                hist.push_back({"user",      player_input, "player"});
-                hist.push_back({"assistant", reply,        "gm"});
+                std::string turn_ts = utc_timestamp();
+                hist.push_back({"user",      player_input, "player", ""});
+                hist.push_back({"assistant", reply,        "gm",     turn_ts});
 
-                write_turn(cfg.saveFile, fstream, cfg.saveMode,
+                write_turn(resolve_save_path(cfg.saveFile), fstream, cfg.saveMode,
                            player_input, reply, narration, snap, hist);
 
                 web_last_llm_reply    = reply;
                 web_last_player_input = player_input;
+
+                // Hook: after_ai_turn(narration, raw_reply) — optional.
+                // Called after LLM response is validated and saved.
+                // May modify Lua state for side-effects (NPC movement, event scheduling, etc.).
+                sol::protected_function aat_fn = lua["after_ai_turn"];
+                if (aat_fn.valid()) aat_fn(narration, reply);
 
                 result_json["success"]            = true;
                 result_json["narration"]           = narration;
@@ -2203,11 +2469,12 @@ sol::table result = f_result;
             json arr = json::array();
             try {
                 std::string dir = cfg.savePath.empty() ? "." : cfg.savePath;
+                std::filesystem::create_directories(dir);
                 for (const auto& e : std::filesystem::directory_iterator(dir)) {
                     if (e.is_regular_file() && e.path().extension() == ".jsonl")
                         arr.push_back(e.path().filename().string());
                 }
-                std::sort(arr.begin(), arr.end());
+                std::sort(arr.begin(), arr.end(), std::greater<std::string>());
                 result["success"] = true;
                 result["saves"]   = arr;
             } catch (const std::exception& ex) {
@@ -2267,21 +2534,20 @@ sol::table result = f_result;
 
                 cfg.script = script_name;
 
-                // Derive a save file name from the script so a new session never
-                // overwrites a save that was loaded from a different script.
-                // strip .lua suffix → append _session.jsonl
+                // Each new start gets its own file: scriptname_MMDD_HHMM.jsonl
                 {
                     std::string base = script_name;
                     auto dot = base.rfind(".lua");
                     if (dot != std::string::npos) base = base.substr(0, dot);
-                    cfg.saveFile = base + "_session.jsonl";
+                    cfg.saveFile = base + "_" + local_session_id() + ".jsonl";
                 }
                 // Close any previously open FULL-mode stream.
                 if (full_stream.is_open()) full_stream.close();
 
                 // Clear optional globals so they don't bleed from a previously loaded script.
                 for (const char* fn : {"get_commands", "get_scene_images",
-                                       "get_asset_path", "get_asset_prompt", "get_tools"}) {
+                                       "get_asset_path", "get_asset_prompt", "get_tools",
+                                       "get_pin_key", "get_image_style"}) {
                     lua[fn] = sol::lua_nil;
                 }
                 lua.script_file(cfg.basePath + cfg.script);
@@ -2300,6 +2566,7 @@ sol::table result = f_result;
                 result["welcome"]    = welcome;
                 result["needs_init"] = true;
                 result["display"]    = "";
+                result["save_file"]  = cfg.saveFile;
 
             } catch (const std::exception& ex) {
                 result["success"] = false;
@@ -2399,7 +2666,8 @@ sol::table result = f_result;
 
                 cfg.script = script_to_load;
                 for (const char* fn : {"get_commands", "get_scene_images",
-                                       "get_asset_path", "get_asset_prompt", "get_tools"}) {
+                                       "get_asset_path", "get_asset_prompt", "get_tools",
+                                       "get_pin_key", "get_image_style"}) {
                     lua[fn] = sol::lua_nil;
                 }
                 lua.script_file(cfg.basePath + cfg.script);
@@ -2483,7 +2751,14 @@ sol::table result = f_result;
                 sol::table cmd_result = lua["process_player_input"](input_text);
                 bool cmd_handled = cmd_result["success"].get<bool>() &&
                                    cmd_result["handled"].get<bool>();
+                // Capture undo checkpoint before turn executes
+                std::string undo_snap = lua["get_state_snapshot"]();
+                auto        undo_hist = chat_history;
                 result = run_turn(input_text, cmd_handled, chat_history, full_stream);
+                if (result.value("success", false)) {
+                    if (undo_stack.size() >= MAX_UNDO_STEPS) undo_stack.pop_front();
+                    undo_stack.push_back({std::move(undo_snap), std::move(undo_hist)});
+                }
             } catch (const std::exception& ex) {
                 result["success"] = false;
                 result["error"]   = std::string(ex.what());
@@ -2523,7 +2798,7 @@ sol::table result = f_result;
 
                 // ---- /save ----
                 if (lower_cmd == "/save") {
-                    write_turn(cfg.saveFile, full_stream, cfg.saveMode,
+                    write_turn(resolve_save_path(cfg.saveFile), full_stream, cfg.saveMode,
                                "[manual save]", "", "", lua["get_state_snapshot"](), chat_history);
                     result["success"] = true;
                     result["output"]  = "Session saved to: " + cfg.saveFile;
@@ -2654,10 +2929,11 @@ sol::table result = f_result;
                             chat_history.pop_back();
                             chat_history.pop_back();
                         }
-                        chat_history.push_back({"user",      web_last_player_input, "player"});
-                        chat_history.push_back({"assistant", fix_reply,             "gm"});
+                        std::string fix_ts = utc_timestamp();
+                        chat_history.push_back({"user",      web_last_player_input, "player", ""});
+                        chat_history.push_back({"assistant", fix_reply,             "gm",     fix_ts});
                         web_last_llm_reply = fix_reply;
-                        write_turn(cfg.saveFile, full_stream, cfg.saveMode,
+                        write_turn(resolve_save_path(cfg.saveFile), full_stream, cfg.saveMode,
                                    web_last_player_input + " [FIX: " + fix_request + "]",
                                    fix_reply, narration, snap, chat_history);
                         result["success"]         = true;
@@ -2712,10 +2988,43 @@ sol::table result = f_result;
                     res.set_header("Content-Type", "application/json"); return res;
                 }
                 if (cmd_result["handled"].get<bool>()) {
-                    sol::optional<std::string> out = cmd_result["output"];
+                    sol::optional<std::string> out        = cmd_result["output"];
+                    sol::optional<std::string> scene_path = cmd_result["scene_path"];
+                    sol::optional<sol::table>  scene_paths= cmd_result["scene_paths"];
+                    bool scene_loop = cmd_result["scene_loop"].get_or(false);
                     result["success"] = true;
                     result["output"]  = out ? *out : "";
                     result["display"] = lua["get_display_state"]().get<std::string>();
+                    if (scene_paths) {
+                        // Slideshow: return images array
+                        json imgs = json::array();
+                        for (auto& kv : *scene_paths) {
+                            std::string fp = kv.second.as<std::string>();
+                            if (!std::filesystem::path(fp).is_absolute())
+                                fp = cfg.basePath + fp;
+                            if (std::filesystem::exists(fp)) {
+                                std::ifstream imgf(fp, std::ios::binary);
+                                std::vector<uint8_t> imgbytes(
+                                    std::istreambuf_iterator<char>(imgf), {});
+                                imgs.push_back(bytes_to_base64(imgbytes));
+                            }
+                        }
+                        result["images"] = imgs;
+                        result["mime"]   = "image/png";
+                        result["loop"]   = scene_loop;
+                    } else if (scene_path) {
+                        std::string fp = *scene_path;
+                        if (!std::filesystem::path(fp).is_absolute())
+                            fp = cfg.basePath + fp;
+                        if (std::filesystem::exists(fp)) {
+                            std::ifstream imgf(fp, std::ios::binary);
+                            std::vector<uint8_t> imgbytes(
+                                std::istreambuf_iterator<char>(imgf), {});
+                            result["image"]    = bytes_to_base64(imgbytes);
+                            result["mime"]     = "image/png";
+                            result["asset_id"] = "scene";
+                        }
+                    }
                 } else {
                     result = run_turn(cmd_text, false, chat_history, full_stream);
                 }
@@ -2739,10 +3048,37 @@ sol::table result = f_result;
                 result["success"] = false;
                 result["error"]   = "No active session.";
             } else {
-                write_turn(cfg.saveFile, full_stream, cfg.saveMode,
+                write_turn(resolve_save_path(cfg.saveFile), full_stream, cfg.saveMode,
                            "[manual save]", "", "", lua["get_state_snapshot"](), chat_history);
                 result["success"] = true;
                 result["message"] = "Saved to: " + cfg.saveFile;
+            }
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // -----------------------------------------------------------------
+        // POST /api/undo  →  revert last turn (up to MAX_UNDO_STEPS)
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/undo").methods("POST"_method)([&]() {
+            std::lock_guard<std::mutex> lock(lua_mutex);
+            json result;
+            if (session_state != SessionState::PLAYING) {
+                result["success"] = false;
+                result["error"]   = "No active session.";
+            } else if (undo_stack.empty()) {
+                result["success"] = false;
+                result["error"]   = "Nothing to undo.";
+            } else {
+                auto& [snap, hist] = undo_stack.back();
+                lua["restore_state"](snap);
+                chat_history = hist;
+                undo_stack.pop_back();
+                // Do NOT clear web_last_llm_reply / web_last_player_input:
+                // they keep the undone turn's data so /fix can still correct it.
+                result["success"] = true;
+                result["display"] = lua["get_display_state"]().get<std::string>();
             }
             crow::response res(result.dump());
             res.set_header("Content-Type", "application/json");
@@ -2766,6 +3102,8 @@ sol::table result = f_result;
             std::string error;
             std::string asset_id;    // id asset coinvolto (per /generate_asset)
             std::string prompt;      // visual prompt usato per la generazione
+            std::string utc_at;      // timestamp completamento (UTC ISO)
+            std::string mime;        // image mime type
         };
 
         std::mutex                          img_jobs_mutex;
@@ -2788,6 +3126,7 @@ sol::table result = f_result;
                     std::lock_guard<std::mutex> lk(img_jobs_mutex);
                     img_jobs[job_id].image_b64 = std::move(b64);
                     img_jobs[job_id].prompt    = std::move(prompt);
+                    img_jobs[job_id].utc_at    = utc_timestamp();
                     img_jobs[job_id].state     = ImageJob::State::DONE;
                 } catch (const std::exception& ex) {
                     std::lock_guard<std::mutex> lk(img_jobs_mutex);
@@ -2820,6 +3159,8 @@ sol::table result = f_result;
                     result["image"]  = job.image_b64;
                     if (!job.asset_id.empty()) result["asset_id"] = job.asset_id;
                     if (!job.prompt.empty())   result["prompt"]   = job.prompt;
+                    if (!job.utc_at.empty())   result["utc_at"]   = job.utc_at;
+                    if (!job.mime.empty())     result["mime"]     = job.mime;
                     break;
                 case ImageJob::State::ERROR:
                     result["status"] = "error";
@@ -3375,17 +3716,91 @@ sol::table result = f_result;
             json result;
 
             std::string asset_id = req.url_params.get("id") ? req.url_params.get("id") : "";
-            if (asset_id.empty()) {
-                result["success"] = false;
-                result["error"]   = "Parameter 'id' is required (?id=<asset_id>).";
-                crow::response res(400, result.dump());
-                res.set_header("Content-Type", "application/json"); return res;
-            }
 
             if (session_state == SessionState::IDLE) {
                 result["success"] = false;
                 result["error"]   = "No active session.";
                 crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+
+            // No id → list all assets in the current scene from get_scene_images()
+            if (asset_id.empty()) {
+                sol::protected_function gsi = lua["get_scene_images"];
+                if (!gsi.valid()) {
+                    result["success"] = false;
+                    result["error"]   = "Script does not implement get_scene_images().";
+                    crow::response res(400, result.dump());
+                    res.set_header("Content-Type", "application/json"); return res;
+                }
+                sol::protected_function_result gsi_r = gsi();
+                if (!gsi_r.valid() || gsi_r.get_type() == sol::type::lua_nil) {
+                    result["success"] = false;
+                    result["error"]   = "get_scene_images() returned nil.";
+                    crow::response res(400, result.dump());
+                    res.set_header("Content-Type", "application/json"); return res;
+                }
+                sol::table img_table = gsi_r;
+                // Handle Format A (array) and Format B (table with "assets" key)
+                sol::object af = img_table["assets"];
+                sol::table  al = (af.valid() && af.get_type() == sol::type::table)
+                                 ? af.as<sol::table>() : img_table;
+
+                json assets_arr = json::array();
+                for (auto& kv : al) {
+                    if (kv.second.get_type() != sol::type::table) continue;
+                    sol::table entry = kv.second;
+                    std::string aid  = entry.get_or<std::string>("id",   "");
+                    std::string apath= entry.get_or<std::string>("path", "");
+                    if (apath.empty()) continue;
+                    std::string full = std::filesystem::path(apath).is_absolute()
+                                       ? apath : cfg.basePath + apath;
+                    bool exists = std::filesystem::exists(full);
+                    json a;
+                    a["id"]     = aid;
+                    a["path"]   = apath;
+                    a["exists"] = exists;
+                    assets_arr.push_back(a);
+                }
+                result["success"] = true;
+                result["assets"]  = assets_arr;
+                crow::response res(result.dump());
+                res.set_header("Content-Type", "application/json");
+                return res;
+            }
+
+            // Special id "pin" → serve pinned image for current scene
+            if (asset_id == "pin") {
+                std::string scene_key;
+                sol::protected_function fn = lua["get_pin_key"];
+                if (fn.valid()) {
+                    auto r = fn();
+                    if (r.valid() && r.get_type() != sol::type::lua_nil)
+                        scene_key = r.get<std::string>();
+                }
+                if (scene_key.empty()) {
+                    result["success"] = false; result["error"] = "Script does not implement get_pin_key()";
+                    crow::response res(400, result.dump());
+                    res.set_header("Content-Type", "application/json"); return res;
+                }
+                auto pin_path = pin_cache::lookup(cfg.basePath, scene_key);
+                if (pin_path.empty()) {
+                    result["success"]   = false;
+                    result["error"]     = "No pin for scene: " + scene_key;
+                    result["scene_key"] = scene_key;
+                    crow::response res(404, result.dump());
+                    res.set_header("Content-Type", "application/json"); return res;
+                }
+                std::ifstream pf2(pin_path, std::ios::binary);
+                std::vector<uint8_t> pb((std::istreambuf_iterator<char>(pf2)), std::istreambuf_iterator<char>());
+                result["success"]   = true;
+                result["asset_id"]  = "pin";
+                result["scene_key"] = scene_key;
+                result["path"]      = pin_path;
+                result["image"]     = bytes_to_base64(pb);
+                result["mime"]      = "image/jpeg";
+                result["pinned"]    = true;
+                crow::response res(result.dump());
                 res.set_header("Content-Type", "application/json"); return res;
             }
 
@@ -3438,6 +3853,109 @@ sol::table result = f_result;
             crow::response res(result.dump());
             res.set_header("Content-Type", "application/json");
             return res;
+        });
+
+        // -----------------------------------------------------------------
+        // POST /api/pin  →  pin a generated image as approved for the current scene
+        // Body: { "job_id": "imgjob_N" }
+        // Calls Lua get_pin_key() for scene key, copies job image to images/pinned/.
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/pin").methods("POST"_method)([&](const crow::request& req) {
+            json result;
+            json body;
+            try { body = json::parse(req.body); } catch (...) {}
+
+            std::string job_id = body.value("job_id", "");
+            if (job_id.empty()) {
+                result["success"] = false; result["error"] = "job_id required";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+
+            // Get image bytes from completed job
+            std::vector<uint8_t> img_bytes;
+            std::string img_prompt;
+            {
+                std::lock_guard<std::mutex> lk(img_jobs_mutex);
+                auto it = img_jobs.find(job_id);
+                if (it == img_jobs.end() || it->second.state != ImageJob::State::DONE) {
+                    result["success"] = false; result["error"] = "Job not found or not done";
+                    crow::response res(404, result.dump());
+                    res.set_header("Content-Type", "application/json"); return res;
+                }
+                img_bytes  = base64_to_bytes(it->second.image_b64);
+                img_prompt = it->second.prompt;
+            }
+
+            // Get scene key from Lua
+            std::string scene_key;
+            {
+                std::lock_guard<std::mutex> lk(lua_mutex);
+                if (session_state == SessionState::IDLE) {
+                    result["success"] = false; result["error"] = "No active session";
+                    crow::response res(400, result.dump());
+                    res.set_header("Content-Type", "application/json"); return res;
+                }
+                sol::protected_function fn = lua["get_pin_key"];
+                if (!fn.valid()) {
+                    result["success"] = false; result["error"] = "Script does not implement get_pin_key()";
+                    crow::response res(400, result.dump());
+                    res.set_header("Content-Type", "application/json"); return res;
+                }
+                auto r = fn();
+                if (!r.valid() || r.get_type() == sol::type::lua_nil) {
+                    result["success"] = false; result["error"] = "get_pin_key() returned nil";
+                    crow::response res(400, result.dump());
+                    res.set_header("Content-Type", "application/json"); return res;
+                }
+                scene_key = r.get<std::string>();
+            }
+
+            json meta;
+            meta["scene_key"] = scene_key;
+            meta["prompt"]    = img_prompt;
+            meta["job_id"]    = job_id;
+
+            auto path = pin_cache::upsert(cfg.basePath, scene_key, img_bytes, meta);
+            result["success"]   = true;
+            result["scene_key"] = scene_key;
+            result["path"]      = path;
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json"); return res;
+        });
+
+        // -----------------------------------------------------------------
+        // POST /api/depin  →  remove pin for current scene (or given key)
+        // Body (optional): { "key": "script|loc|slot|npcs" }
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/depin").methods("POST"_method)([&](const crow::request& req) {
+            json result;
+            json body;
+            try { body = json::parse(req.body); } catch (...) {}
+            std::string scene_key = body.value("key", "");
+
+            if (scene_key.empty()) {
+                std::lock_guard<std::mutex> lk(lua_mutex);
+                if (session_state != SessionState::IDLE) {
+                    sol::protected_function fn = lua["get_pin_key"];
+                    if (fn.valid()) {
+                        auto r = fn();
+                        if (r.valid() && r.get_type() != sol::type::lua_nil)
+                            scene_key = r.get<std::string>();
+                    }
+                }
+            }
+            if (scene_key.empty()) {
+                result["success"] = false; result["error"] = "Could not determine scene key";
+                crow::response res(400, result.dump());
+                res.set_header("Content-Type", "application/json"); return res;
+            }
+            bool removed = pin_cache::remove(cfg.basePath, scene_key);
+            result["success"]   = removed;
+            result["scene_key"] = scene_key;
+            if (!removed) result["error"] = "No pin found for this scene";
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json"); return res;
         });
 
         // -----------------------------------------------------------------
@@ -3638,6 +4156,40 @@ sol::table result = f_result;
         });
 
         // -----------------------------------------------------------------
+        // GET /api/visual_world
+        // Returns JSON visual config if the script implements get_visual_world().
+        // Used by rpgai-gui to load tilemap, rooms, and NPC sprite definitions.
+        // Response: { "supported": bool, "config": {...} } | { "supported": false, "error": "..." }
+        // -----------------------------------------------------------------
+        CROW_ROUTE(app, "/api/visual_world")([&]() {
+            std::lock_guard<std::mutex> lock(lua_mutex);
+            json result;
+            sol::protected_function pf = lua["get_visual_world"];
+            if (!pf.valid()) {
+                result["supported"] = false;
+            } else {
+                try {
+                    sol::protected_function_result r = pf();
+                    if (!r.valid()) {
+                        sol::error e = r;
+                        result["supported"] = false;
+                        result["error"]     = std::string(e.what());
+                    } else {
+                        std::string vw_str = r.get<std::string>(0);
+                        result["supported"] = true;
+                        result["config"]    = json::parse(vw_str);
+                    }
+                } catch (const std::exception& e) {
+                    result["supported"] = false;
+                    result["error"]     = std::string(e.what());
+                }
+            }
+            crow::response res(result.dump());
+            res.set_header("Content-Type", "application/json");
+            return res;
+        });
+
+        // -----------------------------------------------------------------
         // GET /api/commands  →  engine commands + optional script get_commands()
         // -----------------------------------------------------------------
         CROW_ROUTE(app, "/api/commands")([&]() {
@@ -3655,7 +4207,7 @@ sol::table result = f_result;
             json cmds = json::array();
             auto eng = [&](const char* cmd, const char* desc,
                            bool exec = true, const char* label = nullptr) {
-                json item = {{"cmd", cmd}, {"desc", desc}, {"exec", exec}};
+                json item = {{"cmd", cmd}, {"desc", desc}, {"exec", exec}, {"system", true}};
                 if (label) item["label"] = label;
                 cmds.push_back(item);
             };
@@ -3663,12 +4215,13 @@ sol::table result = f_result;
                 false, "/image [lora] [regen|refine|fix [--s 0.9] <text>|compose [--s N]] [--partial]");
             eng("/swap",          "Face-swap: replace detected faces left-to-right with NPC asset faces. Use 'null' to skip a slot, '--enhance' to run GFPGAN after swap. Requires --faceswap-url.",
                 false, "/swap [--enhance] <id1> [null] <id2> ...");
-            eng("/show_asset",    "Show a script asset by ID. Usage: /show_asset <id>",
-                false, "/show_asset <id>");
+            eng("/show_asset",    "Show a script asset. IDs: 'scene' = current scene image, 'pin' = pinned scene image for this location, any other ID = script-defined asset (use /show_asset without args to list). Usage: /show_asset <id|scene|pin>",
+                false, "/show_asset <id|scene|pin>");
             eng("/generate_asset","Generate or regenerate a script asset. Usage: /generate_asset <id>",
                 false, "/generate_asset <id>");
+            eng("/undo",          "Undo the last turn — restores state and history. Use before /fix to correct a bad scene.");
             eng("/observe",       "Ask the AI to describe the current scene in detail");
-            eng("/fix",           "Rewrite the last AI response");
+            eng("/fix",           "Rewrite the last AI response. After /undo, rewrites the undone scene with a correction.");
             eng("/summary",       "Summarise the story so far");
             eng("/save",          "Save the game manually");
 
@@ -4183,6 +4736,13 @@ sol::table result = f_result;
         app.loglevel(crow::LogLevel::Warning);
         app.port(port).multithreaded().run();
     }
+
+    // Clear sol::protected_function references before sol::state goes out of scope.
+    // active_tool_fns is a static global destroyed AFTER sol::state lua (local),
+    // so without this the sol::protected_function destructors call luaL_unref()
+    // on an already-closed Lua state → SIGSEGV on Ctrl+C.
+    active_tools.clear();
+    active_tool_fns.clear();
 
     curl_global_cleanup();
             return 1;

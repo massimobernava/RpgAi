@@ -154,7 +154,7 @@ static size_t write_bytes_cb(void* ptr, size_t size, size_t nmemb, std::vector<u
 static std::string http_post_json(const std::string& url,
                                    const std::string& body,
                                    const std::string& auth_header = "") {
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     if (!curl) throw std::runtime_error("[IMG] curl_easy_init failed");
 
     std::string response;
@@ -182,7 +182,7 @@ static std::string http_post_json(const std::string& url,
 // Performs an HTTP GET, returns response body
 static std::string http_get(const std::string& url,
                               const std::string& auth_header = "") {
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     if (!curl) throw std::runtime_error("[IMG] curl_easy_init failed");
 
     std::string response;
@@ -213,7 +213,7 @@ static std::string http_post_multipart(const std::string& url,
                                         const std::string& model,
                                         int n = 1,
                                         const std::string& size_str = "1024x1024") {
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     if (!curl) throw std::runtime_error("[IMG] curl_easy_init failed");
 
     curl_mime* form   = curl_mime_init(curl);
@@ -282,7 +282,7 @@ static std::vector<uint8_t> http_post_multipart_raw(
         float                     strength,
         float                     guidance_scale = 1.0f) {
 
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     if (!curl) throw std::runtime_error("[IMG] curl_easy_init failed");
 
     curl_mime* form = curl_mime_init(curl);
@@ -349,7 +349,7 @@ static std::vector<uint8_t> http_post_faceswap_raw(
         const std::vector<int>&                   positions,
         bool                                      enhance = false) {
 
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     if (!curl) throw std::runtime_error("[IMG] faceswap: curl_easy_init failed");
 
     curl_mime* form = curl_mime_init(curl);
@@ -809,6 +809,77 @@ inline std::string save_result(const std::string& base_path,
 } // namespace scene_cache
 
 // =============================================================================
+// pin_cache
+//
+// Persistent store of manually approved scene renders ("pins").
+// Storage: images/pinned/pins.json  +  images/pinned/<timestamp>_pin.jpg
+// Key format decided by Lua (get_pin_key): "script|loc|slot|npc1+npc2"
+// =============================================================================
+namespace pin_cache {
+
+inline std::string pin_dir(const std::string& base) { return base + "images/pinned/"; }
+inline std::string idx_path(const std::string& base) { return pin_dir(base) + "pins.json"; }
+
+inline json load_index(const std::string& base) {
+    auto p = idx_path(base);
+    if (!std::filesystem::exists(p)) return json::object();
+    std::ifstream f(p);
+    try { return json::parse(f); } catch (...) { return json::object(); }
+}
+
+inline void save_index(const std::string& base, const json& data) {
+    std::filesystem::create_directories(pin_dir(base));
+    std::ofstream f(idx_path(base));
+    f << data.dump(2);
+}
+
+// Returns absolute path of pinned image for key, empty string if not found.
+inline std::string lookup(const std::string& base, const std::string& key) {
+    auto idx = load_index(base);
+    if (!idx.contains(key)) return "";
+    std::string file = idx[key].value("file", "");
+    if (file.empty()) return "";
+    auto full = pin_dir(base) + file;
+    return std::filesystem::exists(full) ? full : "";
+}
+
+// Saves bytes as new pin file, updates index. Returns absolute path.
+inline std::string upsert(const std::string& base, const std::string& key,
+                           const std::vector<uint8_t>& bytes, const json& meta) {
+    std::filesystem::create_directories(pin_dir(base));
+    auto now = std::chrono::system_clock::now();
+    auto t   = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_buf{};
+#ifdef _WIN32
+    localtime_s(&tm_buf, &t);
+#else
+    localtime_r(&t, &tm_buf);
+#endif
+    char ts[20]; std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
+    std::string filename = std::string(ts) + "_pin.jpg";
+    auto dst = pin_dir(base) + filename;
+    { std::ofstream of(dst, std::ios::binary);
+      of.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
+    auto idx = load_index(base);
+    idx[key] = meta;
+    idx[key]["file"]      = filename;
+    idx[key]["pinned_at"] = std::string(ts);
+    save_index(base, idx);
+    return dst;
+}
+
+// Removes key from index (file kept on disk as history). Returns true if key existed.
+inline bool remove(const std::string& base, const std::string& key) {
+    auto idx = load_index(base);
+    if (!idx.contains(key)) return false;
+    idx.erase(key);
+    save_index(base, idx);
+    return true;
+}
+
+} // namespace pin_cache
+
+// =============================================================================
 // build_collage
 //
 // Loads images from entries, resizes them to the same height (collage_h)
@@ -1234,7 +1305,7 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
 
     // Otherwise it is an HTTP URL — download the bytes
     std::vector<uint8_t> result;
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     if (!curl) throw std::runtime_error("[IMG] curl_easy_init failed");
     curl_easy_setopt(curl, CURLOPT_URL,           img_url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, img_detail::write_bytes_cb);
@@ -1298,7 +1369,7 @@ static std::vector<uint8_t> extract_dashscope_image(const std::string& resp) {
                 return base64_to_bytes(url.substr(comma + 1));
             // HTTP URL — download
             std::vector<uint8_t> result;
-            CURL* curl = curl_easy_init();
+            CURL* curl = make_curl();
             curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  img_detail::write_bytes_cb);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &result);
@@ -1401,7 +1472,7 @@ inline std::vector<uint8_t> txt2img(const std::string& prompt) {
         return base64_to_bytes(url.substr(comma + 1));
     }
     std::vector<uint8_t> result;
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  img_detail::write_bytes_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &result);
@@ -1439,7 +1510,7 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
         return base64_to_bytes(url.substr(comma + 1));
     }
     std::vector<uint8_t> result;
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  img_detail::write_bytes_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &result);
@@ -1486,7 +1557,7 @@ static std::string auth_header() {
 // Downloads an HTTP URL as bytes via curl
 static std::vector<uint8_t> download_url(const std::string& url) {
     std::vector<uint8_t> result;
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     if (!curl) throw std::runtime_error("[IMG] wavespeed: curl_easy_init failed");
     curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  img_detail::write_bytes_cb);
@@ -1602,10 +1673,10 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
                       << "  scale=" << img_cfg.lora_scale << "\n";
         }
     } else {
-        // edit-2511: "images" array (supports bg + NPC refs)
+        // edit-2511: "images" array (max 3 total — API limit)
         json imgs = json::array({bytes_to_base64(collage_bytes)});
-        for (const auto& ref : extra_refs)
-            imgs.push_back(bytes_to_base64(ref));
+        for (size_t i = 0; i < extra_refs.size() && imgs.size() < 3; ++i)
+            imgs.push_back(bytes_to_base64(extra_refs[i]));
         std::cerr << "[IMG] WaveSpeed images count: " << imgs.size() << "\n";
         req["images"] = imgs;
     }

@@ -1,3 +1,11 @@
+// curl_easy_init with CURLOPT_NOSIGNAL — required for safe multithreaded use and
+// to prevent libcurl from touching SIGALRM/SIGPIPE on SIGINT.
+static inline CURL* make_curl() {
+    CURL* c = curl_easy_init();
+    if (c) curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    return c;
+}
+
 // Gemini (Google AI Studio) rejects schemas that contain "additionalProperties".
 // Strip it recursively before forwarding to any Google model via OpenRouter.
 static void strip_additional_properties(json& node) {
@@ -76,7 +84,7 @@ size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
 }
 
 std::string makePostRequest(const std::string& url, const json& body) {
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     std::string readBuffer;
 
     if (curl) {
@@ -212,7 +220,7 @@ std::string openai_query(const std::string& system,
     }
 
     std::string readBuffer;
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     
     if (curl) {
         std::string jsonStr = body.dump();
@@ -297,7 +305,7 @@ std::string claude_query(const std::string& system,
 
     // 4. HTTP request — note different auth header vs OpenAI
     std::string readBuffer;
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
 
     if (curl) {
         std::string jsonStr = body.dump();
@@ -386,7 +394,7 @@ std::string openrouter_query(const std::string& system,
     }
 
     std::string readBuffer;
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
 
     if (curl) {
         std::string jsonStr = body.dump();
@@ -471,7 +479,7 @@ static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata
 static std::string http_post(const std::string& url,
                               const std::string& body,
                               const std::vector<std::string>& headers) {
-    CURL* curl = curl_easy_init();
+    CURL* curl = make_curl();
     if (!curl) return {};
 
     std::string response;
@@ -609,12 +617,87 @@ static std::string openai_tool_loop(
     if (!user_prompt.empty())
         messages.push_back({{"role","user"},{"content",user_prompt}});
 
+    // one_shot_call: single API call with given messages, no tools, tool_choice:none.
+    // Returns content string, or "" on failure.
+    auto one_shot_call = [&](const json& msgs) -> std::string {
+        json rb;
+        rb["model"]       = model;
+        rb["messages"]    = msgs;
+        rb["tool_choice"] = "none";
+        if (!json_schema.empty()) {
+            try {
+                bool is_google = (model.rfind("google/", 0) == 0);
+                json sc = json::parse(json_schema);
+                if (is_google) strip_additional_properties(sc);
+                rb["response_format"] = {{"type","json_schema"},{"json_schema",{
+                    {"name","response"},{"strict",!is_google},{"schema",sc}
+                }}};
+            } catch (...) {}
+        }
+        std::string buf;
+        CURL* c2 = make_curl();
+        if (!c2) return "";
+        std::string js = rb.dump();
+        struct curl_slist* h2 = nullptr;
+        h2 = curl_slist_append(h2, "Content-Type: application/json");
+        if (!api_key.empty()) {
+            std::string auth = "Authorization: Bearer " + api_key;
+            h2 = curl_slist_append(h2, auth.c_str());
+        }
+        curl_easy_setopt(c2, CURLOPT_URL,           base_url.c_str());
+        curl_easy_setopt(c2, CURLOPT_POSTFIELDS,    js.c_str());
+        curl_easy_setopt(c2, CURLOPT_HTTPHEADER,    h2);
+        curl_easy_setopt(c2, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(c2, CURLOPT_WRITEDATA,     &buf);
+        CURLcode rc2 = curl_easy_perform(c2);
+        curl_slist_free_all(h2);
+        curl_easy_cleanup(c2);
+        if (rc2 != CURLE_OK) return "";
+        try {
+            auto jr = json::parse(buf);
+            if (jr.contains("error")) return "";          // API error → signal failure
+            if (jr.contains("choices") && !jr["choices"].empty()) {
+                auto& m = jr["choices"][0]["message"];
+                if (m.contains("content") && m["content"].is_string())
+                    return m["content"].get<std::string>();
+            }
+        } catch (...) {}
+        return "";
+    };
+
+    // rescue_call: 2-stage recovery when the tool loop exits early.
+    // Stage 1: accumulated context + no tools (preserves what the LLM already processed).
+    // Stage 2: fresh context  + no tools (guaranteed small payload).
+    auto rescue_call = [&]() -> std::string {
+        std::cerr << "[TOOL LOOP] rescue stage 1 — accumulated context, no tools\n";
+        std::string r1 = one_shot_call(messages);
+        if (!r1.empty()) return r1;
+        std::cerr << "[TOOL LOOP] rescue stage 2 — fresh context, no tools\n";
+        json fresh = json::array();
+        if (!system.empty())
+            fresh.push_back({{"role","system"},{"content",system}});
+        for (auto& m : history)
+            fresh.push_back({{"role",m.role},{"content",m.content}});
+        if (!user_prompt.empty())
+            fresh.push_back({{"role","user"},{"content",user_prompt +
+                "\n\n[I tool sono stati eseguiti. Scrivi la narrazione adesso nel formato JSON richiesto.]"}});
+        std::string r2 = one_shot_call(fresh);
+        return r2.empty() ? "{\"error\":\"rescue failed\"}" : r2;
+    };
+
     for (int iter = 0; iter < max_iter; ++iter) {
+        bool force_final = (iter == max_iter - 1);
+        if (force_final)
+            std::cerr << "[TOOL LOOP] last iteration — forcing tool_choice:none\n";
         json body;
         body["model"]    = model;
         body["messages"] = messages;
-        body["tools"]    = jtools;
-        body["tool_choice"] = "auto";
+        if (!force_final) {
+            body["tools"]       = jtools;
+            body["tool_choice"] = "auto";
+        } else {
+            body["tool_choice"] = "none";
+        }
 
         if (!json_schema.empty()) {
             try {
@@ -628,7 +711,7 @@ static std::string openai_tool_loop(
         }
 
         std::string readBuffer;
-        CURL* curl = curl_easy_init();
+        CURL* curl = make_curl();
         if (!curl) return "{\"error\":\"curl init failed\"}";
 
         std::string jsonStr = body.dump();
@@ -656,10 +739,10 @@ static std::string openai_tool_loop(
             auto jRes = json::parse(readBuffer);
             if (jRes.contains("error")) {
                 std::cerr << "[TOOL LOOP API ERROR] " << jRes["error"].dump() << "\n";
-                return "{\"error\":\"api error\"}";
+                return rescue_call();
             }
             if (!jRes.contains("choices") || jRes["choices"].empty())
-                return "{\"error\":\"no choices\"}";
+                return rescue_call();
 
             auto& choice = jRes["choices"][0];
             auto& msg    = choice["message"];
@@ -668,7 +751,8 @@ static std::string openai_tool_loop(
             // Append assistant turn for continuity
             messages.push_back(msg);
 
-            if (finish == "tool_calls" && msg.contains("tool_calls")) {
+            // Some models (e.g. Ollama) return finish_reason="stop" but still include tool_calls
+            if (msg.contains("tool_calls") && msg["tool_calls"].is_array() && !msg["tool_calls"].empty()) {
                 for (auto& tc : msg["tool_calls"]) {
                     if (!tc.contains("function") || tc["function"].is_null()) continue;
                     auto& fn = tc["function"];
@@ -697,7 +781,7 @@ static std::string openai_tool_loop(
         }
     }
     std::cerr << "[TOOL LOOP] max iterations (" << max_iter << ") reached\n";
-    return "{\"error\":\"max tool iterations reached\"}";
+    return rescue_call();
 }
 
 // ===========================================================================
@@ -735,15 +819,18 @@ static std::string claude_tool_loop(
         messages.push_back({{"role","user"},{"content",user_prompt}});
 
     for (int iter = 0; iter < max_iter; ++iter) {
+        bool force_final = (iter == max_iter - 1);
+        if (force_final)
+            std::cerr << "[CLAUDE TOOL LOOP] last iteration — forcing no-tools response\n";
         json body;
         body["model"]      = model;
         body["max_tokens"] = 1024;
-        body["tools"]      = jtools;
         body["messages"]   = messages;
         if (!system.empty()) body["system"] = system;
+        if (!force_final) body["tools"] = jtools;
 
         std::string readBuffer;
-        CURL* curl = curl_easy_init();
+        CURL* curl = make_curl();
         if (!curl) return "{\"error\":\"curl init\"}";
 
         std::string jsonStr = body.dump();

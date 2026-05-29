@@ -58,15 +58,32 @@ std::string main_page = R"HTML(<!DOCTYPE html>
   .list-empty { font-size: 11px; color: var(--dim); font-style: italic; padding: 2px 4px; }
 
   /* ---- Command palette ---- */
-  #sb-commands-section { display: none; flex-direction: column; gap: 4px; flex-shrink: 0; }
-  #sb-commands-list { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+  #sb-commands-section, #sb-system-section {
+    display: none; flex-direction: column; gap: 4px; flex-shrink: 0; }
+  #sb-commands-list, #sb-system-list {
+    list-style: none; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+  #sb-commands-list.collapsed, #sb-system-list.collapsed { display: none; }
+  .sb-section-hdr {
+    display: flex; justify-content: space-between; align-items: center;
+    cursor: pointer; user-select: none; }
+  .sb-section-hdr:hover { opacity: .8; }
+  .sb-toggle { font-size: 9px; color: var(--dim); transition: transform .15s; }
+  .sb-toggle.open { transform: rotate(90deg); }
+  /* Adventure = purple (accent), System = teal (accent2) */
   #sb-commands-list li {
+    padding: 4px 8px; border-radius: var(--radius); cursor: pointer;
+    font-size: 11px; font-family: var(--mono); color: var(--accent);
+    background: var(--hud-bg); border: 1px solid var(--border);
+    transition: border-color .15s, color .15s; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  #sb-commands-list li:hover { border-color: var(--accent); color: var(--text); }
+  #sb-system-list li {
     padding: 4px 8px; border-radius: var(--radius); cursor: pointer;
     font-size: 11px; font-family: var(--mono); color: var(--accent2);
     background: var(--hud-bg); border: 1px solid var(--border);
     transition: border-color .15s, color .15s; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; }
-  #sb-commands-list li:hover { border-color: var(--accent2); color: var(--text); }
+  #sb-system-list li:hover { border-color: var(--accent2); color: var(--text); }
 
   /* Pulsanti */
   .btn { width: 100%; padding: 8px; border: none; border-radius: var(--radius);
@@ -97,6 +114,25 @@ std::string main_page = R"HTML(<!DOCTYPE html>
              padding: 2px 4px; line-height: 1; }
   .tts-btn:hover { opacity: 1; }
   .tts-btn.loading { opacity: 0.6; cursor: wait; }
+  .img-hide-btn { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,.5);
+                  border: none; border-radius: 4px; cursor: pointer; font-size: 11px;
+                  color: #ccc; padding: 3px 7px; line-height: 1.4; opacity: 0;
+                  transition: opacity .2s; font-family: var(--mono); }
+  .msg-image:hover .img-hide-btn { opacity: 0.7; }
+  .img-hide-btn:hover { opacity: 1 !important; color: #ff6b6b; }
+  .pin-btn { position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,.5);
+             border: none; border-radius: 4px; cursor: pointer; font-size: 11px;
+             color: #ccc; padding: 3px 7px; line-height: 1.4; opacity: 0.4;
+             transition: opacity .2s; font-family: var(--mono); }
+  .pin-btn:hover  { opacity: 1; }
+  .pin-btn.done   { color: #f5c518; opacity: 1; cursor: default; }
+  .msg-image { position: relative; }
+  /* ---- Sidebar pin box ---- */
+  #sb-pin-section { display: none; flex-direction: column; gap: 6px; flex-shrink: 0; }
+  #sb-pin-thumb   { width: 100%; border-radius: 4px; display: block;
+                    border: 1px solid var(--border); }
+  #sb-pin-key     { font-size: 10px; color: var(--dim); word-break: break-all;
+                    line-height: 1.4; }
   .msg-player    { align-self: flex-end; background: rgba(124,111,205,.18);
                    border: 1px solid var(--accent); color: var(--text);
                    font-size: 13px; max-width: 60%; }
@@ -278,13 +314,34 @@ std::string main_page = R"HTML(<!DOCTYPE html>
       <div id="info-save" class="sb-value">—</div>
       <hr class="sb-sep">
       <button id="btn-manualsave" class="btn btn-secondary">💾 Save now</button>
+      <button id="btn-undo" class="btn btn-ghost">↩ Undo turn</button>
       <hr class="sb-sep">
       <button id="btn-quit" class="btn btn-ghost">✕ Quit game</button>
+      <!-- System commands (engine-level, always shown in-game) -->
+      <div id="sb-system-section">
+        <hr class="sb-sep">
+        <div class="sb-section-hdr" onclick="toggleSection('sb-system-list','sb-sys-toggle')">
+          <span class="sb-label" style="margin:0">Sistema</span>
+          <span id="sb-sys-toggle" class="sb-toggle open">▶</span>
+        </div>
+        <ul id="sb-system-list"></ul>
+      </div>
       <!-- Command palette — populated by loadCommands() if script implements get_commands() -->
       <div id="sb-commands-section">
         <hr class="sb-sep">
-        <div class="sb-label">Comandi</div>
+        <div class="sb-section-hdr" onclick="toggleSection('sb-commands-list','sb-cmd-toggle')">
+          <span class="sb-label" style="margin:0">Script</span>
+          <span id="sb-cmd-toggle" class="sb-toggle open">▶</span>
+        </div>
         <ul id="sb-commands-list"></ul>
+      </div>
+      <!-- Scene pin box — updated by pinScene() / clearPinBox() -->
+      <div id="sb-pin-section">
+        <hr class="sb-sep">
+        <div class="sb-label">📌 Scene Pin</div>
+        <img id="sb-pin-thumb" src="" alt="Pinned scene">
+        <div id="sb-pin-key"></div>
+        <button id="btn-depin" class="btn btn-ghost">🗑 Depin</button>
       </div>
     </div>
     <hr class="sb-sep">
@@ -636,6 +693,7 @@ const btnSend    = document.getElementById('btn-send');
 const btnStart   = document.getElementById('btn-start');
 const btnLoad    = document.getElementById('btn-load');
 const btnManSave = document.getElementById('btn-manualsave');
+const btnUndo    = document.getElementById('btn-undo');
 const btnQuit    = document.getElementById('btn-quit');
 const scriptList = document.getElementById('script-list');
 const saveList   = document.getElementById('save-list');
@@ -646,6 +704,13 @@ const infoScript    = document.getElementById('info-script');
 const infoSave      = document.getElementById('info-save');
 const sbCmdSection  = document.getElementById('sb-commands-section');
 const sbCmdList     = document.getElementById('sb-commands-list');
+const sbSysSection  = document.getElementById('sb-system-section');
+const sbSysList     = document.getElementById('sb-system-list');
+const sbPinSection  = document.getElementById('sb-pin-section');
+const sbPinThumb    = document.getElementById('sb-pin-thumb');
+const sbPinKey      = document.getElementById('sb-pin-key');
+const btnDepin      = document.getElementById('btn-depin');
+let   currentPinKey = null;
 
 /* ================================================================
    Stato UI
@@ -728,7 +793,20 @@ function showGameUI(scriptName, saveName) {
    ================================================================ */
 
 // Mostra un'immagine base64 nel log con didascalia opzionale
-function addImage(b64, caption, mime, tooltip) {
+// localStorage helpers for hidden images
+let currentSaveKey = null;
+function _hiddenKey() { return currentSaveKey ? 'hidden_imgs_' + currentSaveKey : null; }
+function getHiddenImages() {
+  const k = _hiddenKey(); if (!k) return new Set();
+  try { return new Set(JSON.parse(localStorage.getItem(k) || '[]')); } catch { return new Set(); }
+}
+function addHiddenImage(utcAt) {
+  const k = _hiddenKey(); if (!k || !utcAt) return;
+  const s = getHiddenImages(); s.add(utcAt);
+  localStorage.setItem(k, JSON.stringify([...s]));
+}
+
+function addImage(b64, caption, mime, tooltip, utcAt) {
   mime = mime || 'image/png';
   const wrap = document.createElement('div');
   wrap.className = 'msg msg-image';
@@ -743,14 +821,26 @@ function addImage(b64, caption, mime, tooltip) {
     cap.textContent = caption;
     wrap.appendChild(cap);
   }
+  // Hide button (top-left, visible on hover)
+  const hideBtn = document.createElement('button');
+  hideBtn.className = 'img-hide-btn';
+  hideBtn.textContent = '✕ nascondi';
+  hideBtn.title = 'Rimuovi dalla storia (permanente per questo salvataggio)';
+  hideBtn.onclick = (e) => {
+    e.stopPropagation();
+    wrap.style.display = 'none';
+    addHiddenImage(utcAt);
+  };
+  wrap.appendChild(hideBtn);
   log.appendChild(wrap);
   log.scrollTop = log.scrollHeight;
   return wrap;
 }
 
-// Slideshow: slides = [{b64, mime}, ...], autoPlay = bool, intervalMs = int
-function createSlideshow(slides, caption, autoPlay, intervalMs) {
+// Slideshow: slides = [{b64, mime}, ...], autoPlay = bool, intervalMs = int, loop = bool
+function createSlideshow(slides, caption, autoPlay, intervalMs, loop) {
   intervalMs = intervalMs || 3000;
+  loop = !!loop;
   let current = 0;
   let timer   = null;
 
@@ -808,6 +898,7 @@ function createSlideshow(slides, caption, autoPlay, intervalMs) {
     if (timer) clearInterval(timer);
     timer = setInterval(() => {
       if (current < slides.length - 1) { goTo(current + 1); }
+      else if (loop) { goTo(0); }
       else { stopAuto(); }
     }, intervalMs);
     playBtn.textContent = '⏸';
@@ -845,7 +936,7 @@ function createSlideshow(slides, caption, autoPlay, intervalMs) {
 }
 
 // Polling su un job immagine finché non è done/error
-// onDone(b64, assetId, prompt) — onError(msg)
+// onDone(b64, assetId, prompt, mime) — onError(msg)
 function pollImageJob(jobId, onDone, onError, intervalMs) {
   intervalMs = intervalMs || 2500;
   const timer = setInterval(async () => {
@@ -854,7 +945,7 @@ function pollImageJob(jobId, onDone, onError, intervalMs) {
       const data = await r.json();
       if (data.status === 'done') {
         clearInterval(timer);
-        onDone(data.image, data.asset_id || null, data.prompt || '');
+        onDone(data.image, data.asset_id || null, data.prompt || '', data.mime || 'image/jpeg', data.utc_at || null);
       } else if (data.status === 'error') {
         clearInterval(timer);
         onError(data.error || 'Image generation error.');
@@ -865,6 +956,68 @@ function pollImageJob(jobId, onDone, onError, intervalMs) {
       onError('Network error during polling: ' + e.message);
     }
   }, intervalMs);
+}
+
+function updatePinBox(b64, mime, sceneKey) {
+  sbPinThumb.src      = 'data:' + (mime || 'image/jpeg') + ';base64,' + b64;
+  sbPinKey.textContent = sceneKey || '';
+  sbPinSection.style.display = 'flex';
+  currentPinKey = sceneKey;
+}
+
+function clearPinBox() {
+  sbPinSection.style.display = 'none';
+  sbPinThumb.src      = '';
+  sbPinKey.textContent = '';
+  currentPinKey = null;
+}
+
+async function loadPinState() {
+  try {
+    const r = await fetch('/api/show_asset?id=pin');
+    const d = await r.json();
+    if (d.success && d.image) updatePinBox(d.image, d.mime, d.scene_key);
+    else clearPinBox();
+  } catch { clearPinBox(); }
+}
+
+btnDepin.addEventListener('click', async () => {
+  btnDepin.disabled = true;
+  try {
+    const r = await fetch('/api/depin', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(currentPinKey ? {key: currentPinKey} : {})
+    });
+    const d = await r.json();
+    if (d.success) clearPinBox();
+  } catch {}
+  btnDepin.disabled = false;
+});
+
+async function pinScene(jobId, b64, mime, btn) {
+  btn.textContent = '⏳';
+  btn.disabled    = true;
+  try {
+    const r = await fetch('/api/pin', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({job_id: jobId})
+    });
+    const d = await r.json();
+    if (d.success) {
+      btn.textContent = '✓ Pinned';
+      btn.classList.add('done');
+      btn.title = 'Pinned as: ' + d.scene_key;
+      updatePinBox(b64, mime, d.scene_key);
+    } else {
+      btn.textContent = '📌 Pin';
+      btn.disabled    = false;
+      btn.title       = 'Failed: ' + (d.error || '?');
+    }
+  } catch(e) {
+    btn.textContent = '📌 Pin';
+    btn.disabled    = false;
+    btn.title       = e.message;
+  }
 }
 
 // Handles the response from /api/image or /api/generate_asset
@@ -900,11 +1053,22 @@ async function handleImageResponse(data, placeholder, caption) {
   const jobId = data.job_id;
   const hint  = data.warning ? '⚠ ' + data.warning : null;
 
+  // Only scene images (no asset_id) get a pin button
+  const isScene = !data.asset_id;
+
   pollImageJob(jobId,
-    (b64, assetId, prompt) => {
+    (b64, assetId, prompt, mime, utcAt) => {
       const finalCaption = caption || (assetId ? 'Asset: ' + assetId : 'Generated scene');
       const tooltip = (prompt ? prompt + '\n' : '') + 'ID: ' + jobId;
-      const imgEl = addImage(b64, finalCaption + (hint ? '\n' + hint : ''), undefined, tooltip);
+      const imgEl = addImage(b64, finalCaption + (hint ? '\n' + hint : ''), mime, tooltip, utcAt);
+      if (isScene && !assetId) {
+        const pinBtn = document.createElement('button');
+        pinBtn.className = 'pin-btn';
+        pinBtn.textContent = '📌 Pin';
+        pinBtn.title = 'Pin as approved scene render';
+        pinBtn.onclick = () => pinScene(jobId, b64, mime || 'image/jpeg', pinBtn);
+        imgEl.appendChild(pinBtn);
+      }
       if (placeholder) placeholder.replaceWith(imgEl);
       log.scrollTop = log.scrollHeight;
     },
@@ -955,7 +1119,13 @@ async function loadSaves() {
     saveList.innerHTML = '';
     selectedSave      = null;
     btnLoad.disabled  = true;
+    saveEmpty.textContent = 'No saves found.';
 
+    if (!data.success) {
+      saveEmpty.style.display = 'block';
+      saveEmpty.textContent   = 'Saves error: ' + (data.error || 'unknown');
+      return;
+    }
     if (!data.saves || !data.saves.length) {
       saveEmpty.style.display = 'block';
       return;
@@ -984,16 +1154,21 @@ async function loadSaves() {
    ================================================================ */
 async function loadCommands() {
   sbCmdSection.style.display = 'none';
+  sbSysSection.style.display = 'none';
   sbCmdList.innerHTML = '';
+  sbSysList.innerHTML = '';
   try {
     const r    = await fetch('/api/commands');
     const data = await r.json();
     if (!data.success || !data.commands || !data.commands.length) return;
+    let hasSys = false, hasScript = false;
     data.commands.forEach(c => {
-      const li    = document.createElement('li');
+      const isSys    = !!c.system;
+      const targetList = isSys ? sbSysList : sbCmdList;
+      const li = document.createElement('li');
       li.textContent = c.label || c.cmd;
       li.title       = c.desc || c.cmd;
-      li.onclick     = () => {
+      li.onclick = () => {
         if (c.exec) {
           inp.value = c.cmd;
           inp.dispatchEvent(new Event('input'));
@@ -1005,10 +1180,19 @@ async function loadCommands() {
           inp.setSelectionRange(inp.value.length, inp.value.length);
         }
       };
-      sbCmdList.appendChild(li);
+      targetList.appendChild(li);
+      if (isSys) hasSys = true; else hasScript = true;
     });
-    sbCmdSection.style.display = 'flex';
+    if (hasSys)    sbSysSection.style.display = 'flex';
+    if (hasScript) sbCmdSection.style.display = 'flex';
   } catch (_) {}
+}
+
+function toggleSection(listId, toggleId) {
+  const list = document.getElementById(listId);
+  const tog  = document.getElementById(toggleId);
+  const collapsed = list.classList.toggle('collapsed');
+  tog.classList.toggle('open', !collapsed);
 }
 
 /* ================================================================
@@ -1039,8 +1223,10 @@ btnStart.addEventListener('click', async () => {
     hud.textContent = data.display || '';
     gameState       = 'awaiting_init';
     inp.placeholder = 'Reply to the script (empty = use default)...';
-    showGameUI(selectedScript, null);
+    currentSaveKey = data.save_file || null;
+    showGameUI(selectedScript, data.save_file || null);
     loadCommands();
+    clearPinBox();
     setInputEnabled(true);
     inp.focus();
 
@@ -1078,8 +1264,10 @@ btnLoad.addEventListener('click', async () => {
     hud.textContent = data.display || '';
     gameState       = 'playing';
     inp.placeholder = 'What do you do?';
+    currentSaveKey = selectedSave || null;
     showGameUI(data.script || selectedSave, selectedSave);
     loadCommands();
+    loadPinState();
 
     // Correlate images with turns by timestamp, then replay chat with images inline.
     // Turn timestamps: "YYYY-MM-DDTHH:MM:SSZ" (UTC ISO)
@@ -1115,13 +1303,16 @@ btnLoad.addEventListener('click', async () => {
 
     // Async image loader — appends to log in order, with tooltip (prompt + file ID)
     async function loadAndShowImages(imgList) {
+      const hidden = getHiddenImages();
       for (const img of imgList) {
+        const utcAt = img.utc_at || img.generated_at;
+        if (hidden.has(utcAt)) continue;
         try {
           const r2 = await fetch('/api/scene_image?file=' + encodeURIComponent(img.file));
           const d2 = await r2.json();
           if (d2.success) {
             const tooltip = (img.prompt ? img.prompt + '\n' : '') + 'ID: ' + (img.cache_key || img.file);
-            addImage(d2.image, img.generated_at || 'Scene', d2.mime, tooltip);
+            addImage(d2.image, img.generated_at || 'Scene', d2.mime, tooltip, utcAt);
           }
         } catch (_) {}
       }
@@ -1166,6 +1357,27 @@ btnManSave.addEventListener('click', async () => {
                    : ('Save error: ' + (data.error || '?')));
   } catch (e) {
     addMsg('msg-error', 'Network error while saving.');
+  }
+});
+
+/* ================================================================
+   UNDO TURN
+   ================================================================ */
+btnUndo.addEventListener('click', async () => {
+  btnUndo.disabled = true;
+  try {
+    const r    = await fetch('/api/undo', { method: 'POST' });
+    const data = await r.json();
+    if (data.success) {
+      hud.textContent = data.display || hud.textContent;
+      addMsg('msg-system', '↩ Turno annullato — stato ripristinato.');
+    } else {
+      addMsg('msg-system', 'Undo: ' + (data.error || 'impossibile annullare.'));
+    }
+  } catch (e) {
+    addMsg('msg-error', 'Network error during undo.');
+  } finally {
+    btnUndo.disabled = false;
   }
 });
 
@@ -1251,7 +1463,7 @@ async function sendInput() {
   let endpoint, fetchOpts;
   if (text.startsWith('/show_asset')) {
     const id = text.split(' ').slice(1).join(' ').trim();
-    endpoint  = '/api/show_asset?id=' + encodeURIComponent(id);
+    endpoint  = id ? '/api/show_asset?id=' + encodeURIComponent(id) : '/api/show_asset';
     fetchOpts = { method: 'GET' };
   } else if (text.startsWith('/image')) {
     const partial  = text.includes('--partial');
@@ -1283,6 +1495,9 @@ async function sendInput() {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ id })
     };
+  } else if (text.trim() === '/undo') {
+    endpoint  = '/api/undo';
+    fetchOpts = { method: 'POST' };
   } else {
     endpoint  = isCommand ? '/api/command' : '/api/chat';
     fetchOpts = {
@@ -1297,6 +1512,16 @@ async function sendInput() {
     const data = await r.json();
     thinking.remove();
 
+    if (endpoint === '/api/undo') {
+      if (data.success) {
+        if (data.display) hud.textContent = data.display;
+        addMsg('msg-system', '↩ Turn undone — state restored. You can now type /fix to correct the scene.');
+      } else {
+        addMsg('msg-system', 'Undo: ' + (data.error || 'nothing to undo.'));
+      }
+      setInputEnabled(true); inp.focus(); return;
+    }
+
     if (!data.success) {
       if (data.missing && data.missing.length > 0) {
         // /image with missing assets — show the list with generate hints
@@ -1310,8 +1535,22 @@ async function sendInput() {
         addMsg('msg-narration', data.narration);
         if (data.display) hud.textContent = data.display;
         if (data.game_over) { handleGameOver(data.game_over_reason); return; }
+      } else if (data.images !== undefined && data.images.length > 0) {
+        // /scene slideshow — immagini già base64, ciclo automatico
+        if (data.output) addMsg('msg-command', data.output);
+        if (data.display) hud.textContent = data.display;
+        const slides = data.images.map(b64 => ({ b64, mime: data.mime || 'image/png' }));
+        createSlideshow(slides, '', true, 2000, !!data.loop);
+      } else if (data.assets !== undefined) {
+        // /show_asset (no id) — list assets in current scene
+        const lines = data.assets.map(a => {
+          const mark = a.exists ? '✓' : '✗';
+          const hint = a.exists ? '' : '  → /generate_asset ' + a.id;
+          return mark + ' ' + a.id + '  ' + a.path + hint;
+        });
+        addMsg('msg-command', 'Scene assets:\n' + lines.join('\n'));
       } else if (data.image !== undefined) {
-        // /show_asset — synchronous image already ready
+        // /show_asset <id> — synchronous image already ready
         addImage(data.image, 'Asset: ' + (data.asset_id || text), data.mime);
       } else if (data.job_id !== undefined) {
         // /image, /generate_asset, /swap — async, poll for result
@@ -1331,6 +1570,7 @@ async function sendInput() {
       if (data.game_over) { handleGameOver(data.game_over_reason); return; }
       await processActions(data.actions);
       showSuggestions(data.suggested_actions);
+      loadPinState();
     }
   } catch (e) {
     thinking.remove();
@@ -1534,33 +1774,7 @@ async function initWithRetry() {
   };
   tryLoad();
 
-  // loadSaves non richiede retry aggressivo — fallimento silenzioso è ok
-  try {
-    const r    = await fetch('/api/saves');
-    const data = await r.json();
-    saveList.innerHTML = '';
-    selectedSave      = null;
-    btnLoad.disabled  = true;
-    if (!data.saves || !data.saves.length) {
-      saveEmpty.style.display = 'block';
-      return;
-    }
-    saveEmpty.style.display = 'none';
-    data.saves.forEach(s => {
-      const li       = document.createElement('li');
-      li.textContent = s;
-      li.onclick     = () => {
-        saveList.querySelectorAll('li').forEach(x => x.classList.remove('active-save'));
-        li.classList.add('active-save');
-        selectedSave     = s;
-        btnLoad.disabled = false;
-      };
-      saveList.appendChild(li);
-    });
-  } catch (e) {
-    saveEmpty.style.display = 'block';
-    saveEmpty.textContent   = 'Error loading saves.';
-  }
+  await loadSaves();
 }
 
 initWithRetry();
