@@ -2,7 +2,7 @@
 --
 -- Usage in your script:
 --
---   local tools = require("lib/tools")
+--   local tools = require("tools")
 --
 --   function get_tools()
 --       return tools.build({
@@ -17,7 +17,7 @@
 -- Pass your mutable `state` table so tool functions can read/write it.
 -- Add custom tools by appending ToolDef tables to the list.
 
-local json = require("lib/json")
+local json = require("json")
 local M = {}
 
 -- Wrap a ToolDef list for use as get_tools() return value.
@@ -193,6 +193,69 @@ function M.query_state(field_name, description, field_fn)
             local ok, val = pcall(field_fn)
             if not ok then return json.encode({ error = tostring(val) }) end
             return json.encode(val)
+        end
+    }
+end
+
+-- ---------------------------------------------------------------------------
+-- Remember / Forget — persistent GM notes across turns
+-- ---------------------------------------------------------------------------
+-- Usage: pass state table that has a `notes` field (table of strings).
+-- Initialize in your script: state.notes = {}
+--
+-- These two tools let the LLM record/remove short narrative facts that don't
+-- fit as flags (e.g. "Jenny is annoyed about yesterday", "player lied to Diane").
+-- Notes are injected into the system prompt via get_system_prompt() when present.
+
+function M.remember(state)
+    return {
+        name = "remember",
+        description = "Store a short narrative fact to remember across future turns. Use for plot details, NPC mood changes, past events, or anything the GM should keep in mind that doesn't fit as a flag. Keep each note under 15 words.",
+        params = [[{
+            "type": "object",
+            "required": ["note"],
+            "properties": {
+                "note": { "type": "string", "description": "Short fact to remember (max ~15 words)." }
+            }
+        }]],
+        fn = function(args_json)
+            local a = json.decode(args_json)
+            local note = (a.note or ""):match("^%s*(.-)%s*$")
+            if note == "" then
+                return json.encode({ ok = false, error = "empty note" })
+            end
+            state.notes = state.notes or {}
+            table.insert(state.notes, note)
+            if #state.notes > 25 then table.remove(state.notes, 1) end  -- FIFO: keep 25 most recent
+            return json.encode({ ok = true, note = note, total = #state.notes })
+        end
+    }
+end
+
+function M.forget(state)
+    return {
+        name = "forget",
+        description = "Remove a previously remembered note that is no longer relevant or has been superseded. Provide the exact text of the note to remove.",
+        params = [[{
+            "type": "object",
+            "required": ["note"],
+            "properties": {
+                "note": { "type": "string", "description": "Exact text of the note to remove." }
+            }
+        }]],
+        fn = function(args_json)
+            local a = json.decode(args_json)
+            local target = (a.note or ""):match("^%s*(.-)%s*$")
+            state.notes = state.notes or {}
+            local removed = false
+            for i = #state.notes, 1, -1 do
+                if state.notes[i] == target then
+                    table.remove(state.notes, i)
+                    removed = true
+                    break
+                end
+            end
+            return json.encode({ ok = removed, remaining = #state.notes })
         end
     }
 end

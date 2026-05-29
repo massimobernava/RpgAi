@@ -428,7 +428,18 @@ function NPC:update(time_str, day_str, protagonist_loc)
             -- try variations (first match wins by default; random otherwise)
             if r.variations then
                 for _, v in ipairs(r.variations) do
-                    local prob_ok = (not v.prob) or math.random() < v.prob
+                    -- prob_boost_when: { stat="stress", min=0.5, boosted_prob=0.7 }
+                    -- when the condition is met, replaces the base prob with boosted_prob
+                    local prob_ok
+                    if v.prob_boost_when then
+                        local pb  = v.prob_boost_when
+                        local sv  = self:getStat(pb.stat or "")
+                        local hit = (pb.min and sv >= pb.min) or (pb.max and sv <= pb.max)
+                        local eff = (hit and pb.boosted_prob) or v.prob or 1.0
+                        prob_ok   = math.random() < eff
+                    else
+                        prob_ok = (not v.prob) or math.random() < v.prob
+                    end
                     if prob_ok and self:_check(v.condition) then
                         self:_applyStats(v.stats)
                         self:_emit(v.event, v.info)
