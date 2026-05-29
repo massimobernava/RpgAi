@@ -118,3 +118,63 @@ target_compile_options(rpgai PRIVATE
 )
 
 install(TARGETS rpgai RUNTIME DESTINATION bin)
+
+# ===========================================================================
+# Optional: rpgai-gui — native Raylib+ImGui desktop client
+#   macOS:  brew install raylib
+#   Ubuntu: sudo apt install libraylib-dev   (or build from source)
+# Connects to rpgai --web server; does NOT require LuaJIT or Asio.
+# ===========================================================================
+find_package(raylib 5.5 QUIET)
+if(raylib_FOUND)
+    set(IMGUI_DIR   ${VENDOR_DIR}/imgui)
+    set(RLIMGUI_DIR ${VENDOR_DIR}/rllmGui)
+
+    add_executable(rpgai-gui
+        src/gui_main.cpp
+        ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp
+        ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp
+        ${RLIMGUI_DIR}/rlImGui.cpp
+    )
+
+    target_include_directories(rpgai-gui PRIVATE
+        ${VENDOR_DIR}
+        ${VENDOR_DIR}/imgui
+        ${VENDOR_DIR}/rllmGui
+        ${VENDOR_DIR}/httplib
+        ${CURL_INCLUDE_DIRS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_compile_options(rpgai-gui PRIVATE
+        $<$<CONFIG:Release>:-O2>
+        $<$<CONFIG:Debug>:-g -O0>
+    )
+
+    target_link_libraries(rpgai-gui PRIVATE raylib)
+
+    if(APPLE)
+        target_link_libraries(rpgai-gui PRIVATE
+            "-framework IOKit"
+            "-framework Cocoa"
+            "-framework OpenGL"
+        )
+    endif()
+
+    if(UNIX AND NOT APPLE)
+        find_package(Threads REQUIRED)
+        target_link_libraries(rpgai-gui PRIVATE Threads::Threads)
+    endif()
+
+    if(WIN32)
+        target_compile_definitions(rpgai-gui PRIVATE _WIN32_WINNT=0x0602)
+        target_link_libraries(rpgai-gui PRIVATE ws2_32)
+    endif()
+
+    install(TARGETS rpgai-gui RUNTIME DESTINATION bin)
+    message(STATUS "rpgai-gui: ENABLED  (raylib ${raylib_VERSION} found)")
+else()
+    message(STATUS "rpgai-gui: DISABLED (raylib not found; macOS: brew install raylib)")
+endif()

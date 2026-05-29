@@ -49,3 +49,4 @@ cmake --build . -- -j"$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null
 
 echo ""
 echo "Build complete: $BUILD_DIR/rpgai  ($BUILD_TYPE)"
+[ -f rpgai-gui ] && echo "               $BUILD_DIR/rpgai-gui  ($BUILD_TYPE)" || true
