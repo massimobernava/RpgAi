@@ -41,7 +41,10 @@ Whether you want to recreate a classic D&D dungeon crawl, build an interactive m
 - 🔧 **Hackable C++ core** — clean header-based architecture designed to be extended
 - 🗂 **Smart image cache** — scene images cached by composition key; unchanged scenes reuse existing renders
 - 🔁 **In-game commands** — `/fix`, `/observe`, `/summary`, `/image` and custom Lua commands in both console and web mode
-- 🖥 **Local AI servers** — optional Python servers for local image generation (Qwen-Image-Edit-2511) and TTS (XTTS v2), manageable from the web UI (install deps, start, stop)
+- 🖥 **Local AI servers** — optional Python servers for local image generation (FLUX + PuLID face conditioning) and TTS (XTTS v2), manageable from the web UI (install deps, start, stop)
+- 🧠 **NPC agent system** — LLM-driven NPCs as first-class objects (`lib/agent.lua`): shared turn caps, structured fallback, idempotent caching
+- 💭 **Persistent memory** — cross-session fact storage per entity/category (`lib/memory.lua`), readable by agents, writable by the main LLM via tool calls
+- 🌍 **Procedural world expansion** — locations, objects and NPCs generated on-demand by the LLM and persisted to disk (`lib/world.lua`, `lib/persona.lua`)
 
 ---
 
@@ -85,13 +88,29 @@ RpgAi/
 │   └── web_page.h        # Embedded single-page web UI (HTML/CSS/JS)
 ├── scripts/
 │   ├── fantasy_demo.lua  # Demo adventure — classic fantasy
-│   └── lib/              # Shared Lua libraries (json, json_repair)
+│   ├── npc_demo.lua      # Demo adventure — code-driven NPCs with routines
+│   ├── template.lua      # Full-featured adventure template (heavily commented)
+│   └── lib/
+│       ├── json.lua          # Pure-Lua JSON encoder/decoder
+│       ├── json_repair.lua   # Auto-repair malformed LLM JSON
+│       ├── tools.lua         # Pre-built tool definitions (dice, skill check, inventory…)
+│       ├── npc.lua           # Code-driven NPC system (routines, needs, events)
+│       ├── agent.lua         # LLM-driven NPC agents (composed with npc.lua)
+│       ├── memory.lua        # Persistent structured memory (JSON-backed)
+│       ├── world.lua         # Procedural location/object generation on demand
+│       └── persona.lua       # File-backed procedural NPCs (grow over time)
+├── tools/
+│   ├── test_player.py    # Automated AI playtest driver (Playwright + OpenRouter)
+│   ├── img2text.py/sh    # VLM scene description (Ollama vision models)
+│   ├── t2i.py/sh         # Text-to-image generation helper
+│   └── qwen_edit.py/sh   # Image-to-image editing helper
+├── t2i_locale/
+│   ├── server.py         # FastAPI image server (FLUX + PuLID face conditioning, port 8001)
+│   └── requirements.txt  # Python deps for t2i_locale
 ├── tts_locale/
 │   ├── server.py         # FastAPI TTS server (Coqui XTTS v2, port 8004)
 │   ├── patch_tts_compat.py  # Compatibility patches for PyTorch 2.6+ / transformers 4.37+
 │   └── test_tts.py       # CLI test script (--url for remote servers)
-├── qwen_locale/
-│   └── server_locale.py  # FastAPI image server (Qwen-Image-Edit-2511, port 8000)
 ├── docs/                 # Extended documentation
 ├── vendor/               # Header-only dependencies (see docs/installation.md)
 ├── CMakeLists.txt
@@ -251,17 +270,45 @@ Key options: `--temperature` (voice similarity, default 0.2), `--strip-silence` 
 
 Once running, configure the narrator voice in Settings → Local Servers → TTS. The web UI fetches audio in sentence-sized chunks fired in parallel — sentence N+1 is generated while sentence N is playing, keeping latency low on long narrations.
 
-### Qwen locale server (`qwen_locale/server_locale.py`)
+### t2i locale server (`t2i_locale/server.py`)
 
-Provides local image-to-image scene rendering using **Qwen-Image-Edit-2511** (DiT ~14B, BF16). Designed for RTX 5090 / 32 GB VRAM with `--cpu-offload`; works on smaller cards with appropriate quantization flags.
+Provides local text-to-image and image-to-image rendering using **FLUX** models with optional **PuLID** face conditioning. Designed for RTX 5090 / 32 GB VRAM; works on smaller cards with TorchAO quantization.
 
 ```bash
-# Recommended launch for RTX 5090
-python qwen_locale/server_locale.py \
-  --dtype bf16 --host 0.0.0.0 --lightning --fast --cpu-offload
+# Install deps
+pip install -r t2i_locale/requirements.txt
+
+# Start (basic)
+python t2i_locale/server.py --host 0.0.0.0
+
+# With PuLID face conditioning
+python t2i_locale/server.py --host 0.0.0.0 --pulid
 ```
 
-Set the server URL in **Settings → Image I2I → URL** (e.g. `http://192.168.1.x:8000`). The engine uses it automatically for `/image` commands.
+Set the server URL in **Settings → Image T2I / I2I → URL** (e.g. `http://192.168.1.x:8001`). When PuLID is enabled, store a reference face for an NPC once; subsequent generations use it automatically for consistent character appearance.
+
+---
+
+## 🧪 Testing your script
+
+`tools/test_player.py` is an automated test player that uses an LLM (via OpenRouter) to drive playthroughs of any adventure script. Useful for QA testing and pre-generating scene images before release.
+
+```bash
+pip install playwright requests && playwright install chromium
+
+# Basic test run
+python tools/test_player.py --api-key sk-or-... --script my_adventure.lua
+
+# Pre-generate images headless, save to img/ folder
+python tools/test_player.py --api-key sk-or-... --script my_adventure.lua \
+    --headless --image-every 2 --collect-images img/ --max-turns 40
+
+# Targeted test with a specific objective
+python tools/test_player.py --api-key sk-or-... --script my_adventure.lua \
+    --objective "Find the hidden merchant and buy the rare sword" --max-turns 20
+```
+
+Key options: `--image-every N` (generate images every N turns), `--collect-images DIR` (save images to folder), `--objective` (guide the AI toward a specific path), `--headless` (no browser window), `--cps` (typing speed; use 9 for demo recordings).
 
 ---
 
@@ -282,10 +329,15 @@ Set the server URL in **Settings → Image I2I → URL** (e.g. `http://192.168.1
 - [ ] Multi-session web mode (multiple simultaneous players)
 - [ ] Two-level scene cache (hard key + soft narrative key for smart i2i reuse)
 - [ ] WebSocket streaming for real-time narration display
-- [x] Narrator TTS — local Coqui XTTS v2 server; pipeline sentence playback; web UI voice selector
 - [ ] Per-NPC voice cloning — Lua `get_npc_voices()` to assign voice profiles to characters
 - [ ] Script hot-reload in web mode
 - [ ] Issue templates for bug reports and feature requests
+- [x] Narrator TTS — local Coqui XTTS v2 server; pipeline sentence playback; web UI voice selector
+- [x] Local t2i server — FLUX + PuLID face conditioning; consistent NPC portraits across scenes
+- [x] NPC agent system — `lib/agent.lua`; shared turn caps; idempotent caching; structured fallback
+- [x] Persistent memory — `lib/memory.lua`; cross-session entity/category facts; tool-call writable
+- [x] Procedural world — `lib/world.lua` + `lib/persona.lua`; on-demand generation; file-backed NPCs
+- [x] Tool calling — `lib/tools.lua`; pre-built dice/skill/inventory tools; custom tool schema
 
 ---
 
