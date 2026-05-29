@@ -1,0 +1,36 @@
+# t2i_locale — Python dependencies
+#
+# Core
+fastapi
+uvicorn[standard]
+python-multipart
+pillow
+numpy
+requests
+
+# Diffusers stack
+# diffusers 0.38+ required for PipelineQuantizationConfig (torchao_int8)
+diffusers>=0.38.0
+transformers
+accelerate
+safetensors
+huggingface_hub
+
+# PyTorch — install the version that matches your CUDA / hardware
+# RTX 5090 (Blackwell SM_120): torch 2.7+ recommended
+# pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# Quantization (optional but recommended on Blackwell)
+# DO NOT use bitsandbytes 8bit on SM_120 (known incompatibility)
+# Use TorchAO instead:
+# pip install torchao
+
+# PuLID face conditioning (optional — enables --pulid flag)
+# Not on PyPI — install from GitHub:
+#   pip install git+https://github.com/ToTheBeginning/PuLID.git
+insightface
+onnxruntime-gpu  # swap with onnxruntime on CPU-only machines
+timm
+einops
+ftfy
+torchsde
