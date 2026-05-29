@@ -19,6 +19,17 @@ CLAUDE.md
 # Generated scene images (cache rebuilt at runtime)
 scripts/images/
 
+# Generated NPC files from persona.lua (rebuilt at runtime)
+scripts/lib/npcs/
+scripts/npcs/
+
+# ImGui window state (local UI preference, not project state)
+imgui.ini
+
+# Private scripts and tools (local only)
+my_scripts/
+my_tools/
+
 # Launch scripts containing API keys.
 # Commit a *.sh.template with placeholders instead.
 openrouter_web.sh
@@ -34,17 +45,6 @@ rpgai_settings.json
 
 # Private game scripts (not published — only fantasy_demo.lua is public)
 npc_mod/
-scripts/lib/npcs/
-scripts/estate_italiana_*.lua
-scripts/snow_daze_*.lua
-scripts/villa*.lua
-scripts/sogno_lucido_*.lua
-scripts/lib/estate_data.lua
-scripts/lib/estate_dataX.lua
-scripts/lib/estate*
-scripts/data/
-scripts/plaza_data/
-scripts/summertime_data/
 narrative/
 guida/
 
@@ -61,6 +61,16 @@ pipeline_stages/
 
 # Native pipeline (WIP — not ready for public release)
 pipeline_native/
+
+# Native GUI frontend (rpgai-gui) — experimental, not ready for public release
+src/gui_main.cpp
+src/gui_objects.h
+src/gui_sprite.h
+src/gui_tilemap.h
+src/gui_visual.h
+scripts/lib/visual.lua
+vendor/imgui/
+vendor/rllmGui/
 installer/macos/RpgAi.app/
 installer/macos/app-template/
 
@@ -70,6 +80,11 @@ tts_locale/voice/
 
 # Generated images from qwen_locale (test outputs)
 qwen_locale/*.png
+
+# t2i_locale — private NPC reference faces, generated outputs, downloaded models
+t2i_locale/references/
+t2i_locale/output/
+t2i_locale/models/
 
 # Local script copies with spaces in name
 *\ copia.*
