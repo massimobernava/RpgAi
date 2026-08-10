@@ -35,16 +35,21 @@ Whether you want to recreate a classic D&D dungeon crawl, build an interactive m
 - 📖 **RAG narrative style** — feed the engine example narrations to lock in the tone and prose style of your world
 
 **For developers and world-builders**
+- 🤖 **CoderAI** — in-browser AI coding assistant for writing, debugging and evolving adventure scripts without leaving the web UI (see [CoderAI](#-coderai))
 - 🔌 **Multi-provider LLM support** — Ollama (local), OpenRouter, Gemini, OpenAI, Claude, or any OpenAI-compatible endpoint
 - 🖊 **Lua scripting** — simple, readable scripts define everything: locations, NPCs, game rules, JSON schema, commands
 - ⚡ **LuaJIT powered** — fast Lua execution with full access to the C++ engine via exposed functions
 - 🔧 **Hackable C++ core** — clean header-based architecture designed to be extended
-- 🗂 **Smart image cache** — scene images cached by composition key; unchanged scenes reuse existing renders
+- 🗂 **Smart image cache** — scene images cached by composition key (asset set + mtime + size); unchanged scenes reuse existing renders, regenerations replace the cached entry; thread-safe with atomic writes
 - 🔁 **In-game commands** — `/fix`, `/observe`, `/summary`, `/image` and custom Lua commands in both console and web mode
 - 🖥 **Local AI servers** — optional Python servers for local image generation (FLUX + PuLID face conditioning) and TTS (XTTS v2), manageable from the web UI (install deps, start, stop)
 - 🧠 **NPC agent system** — LLM-driven NPCs as first-class objects (`lib/agent.lua`): shared turn caps, structured fallback, idempotent caching
 - 💭 **Persistent memory** — cross-session fact storage per entity/category (`lib/memory.lua`), readable by agents, writable by the main LLM via tool calls
 - 🌍 **Procedural world expansion** — locations, objects and NPCs generated on-demand by the LLM and persisted to disk (`lib/world.lua`, `lib/persona.lua`)
+- 🎭 **Autonomous NPCs with event-gated LLM** — NPCs run mostly on cheap scripted behaviour (routines, needs, probabilistic event variations, multi-step sequences); the LLM fires only on beats you mark, so a whole cast can live "off-screen" affordably (`agent.tick_and_log`)
+- 📊 **Per-component token accounting** — the engine reads `usage` from every response and attributes tokens by component (narrator / agent / generation / ambient), so you can see exactly where tokens go and pick cheap models for the high-volume roles (`get_token_usage()`)
+- 🧩 **Provider schema compatibility** — JSON schemas are auto-adapted per model (Google `additionalProperties`, Anthropic integer `min/max` & array `minItems`): write the constraints once, the engine strips what a given provider can't enforce
+- ⏰ **Target-time skips** — a `sleep_until` tool jumps the clock to a wake time (not a duration), running the same off-screen simulation, so "sleep until morning" keeps narration and clock in sync
 
 ---
 
@@ -123,7 +128,7 @@ RpgAi/
 
 **`llm_query.h`** — single abstraction for all text generation providers behind one function: `query_llm(provider, sys_prompt, history, user_prompt, json_schema, model)`. Supported providers: Ollama, OpenRouter, Gemini, OpenAI, Claude, any OpenAI-compatible endpoint.
 
-**`llm_image.h`** — everything visual: asset collage builder, text-to-image, image-to-image, scene cache. Providers: stable-diffusion.cpp, OpenAI, OpenRouter, fal.ai, WaveSpeed, DashScope, AIMLAPI, Qwen local. t2i and i2i can use different providers independently.
+**`llm_image.h`** — everything visual: asset collage builder, text-to-image, image-to-image, scene cache. Providers: stable-diffusion.cpp, OpenAI, OpenRouter, fal.ai, WaveSpeed, DashScope, AIMLAPI, Qwen local. t2i and i2i can use different providers independently. Every result is validated (HTTP status + image magic bytes) before being cached or returned; the cache db is mutex-protected and written atomically.
 
 **`web_page.h`** — the entire single-page application as a C++ raw string literal. No build step, no bundler — Crow serves it directly from memory.
 
@@ -289,6 +294,143 @@ Set the server URL in **Settings → Image T2I / I2I → URL** (e.g. `http://192
 
 ---
 
+## 🤖 CoderAI
+
+CoderAI is an in-browser AI coding assistant built into the web UI. It runs as a separate chat thread — independent from the active game session — and can read/write files, inspect the live game state, execute Lua in a sandbox, search the web, and generate or edit images, all from a single panel.
+
+The primary workflow is **observe → diagnose → surgical fix → hot-reload**, without ever opening a terminal or editor.
+
+### Enabling CoderAI
+
+CoderAI uses a separate LLM provider/model from the game. A capable model with tool-calling support is strongly recommended (e.g. Claude or GPT-4o via OpenRouter, or a strong local model like Qwen through Ollama).
+
+> **Supported coder providers:** `openrouter`, `openai`, `ollama`. CoderAI's tool loop speaks the OpenAI tool-calling wire format, so `--coder-provider claude` and `--coder-provider gemini` are **not** supported directly — run those models *through* OpenRouter instead (e.g. `--coder-model anthropic/claude-3.5-sonnet`). Selecting an unsupported coder provider returns a clear error in the CoderAI panel instead of failing silently.
+
+```bash
+# Run Claude as the coder model via OpenRouter, Ollama for the game
+./build/rpgai --web \
+  --provider ollama --model llama3.2 --path scripts/ \
+  --coder-provider openrouter --coder-model anthropic/claude-3.5-sonnet --coder-key sk-or-...
+
+# Use the same OpenRouter key for both game and CoderAI
+./build/rpgai --web \
+  --provider openrouter --or-key sk-or-... --or-model anthropic/claude-3.5-sonnet \
+  --path scripts/ --save-path saves/ --save-mode full \
+  --coder-provider openrouter --coder-model anthropic/claude-3.5-sonnet
+```
+
+Then open **http://localhost:8080** and click the **CoderAI** tab.
+
+> **Tip:** use `--save-mode full` during development sessions. It persists every turn to disk, letting CoderAI's `load_save` tool restore the game to any prior point for deep undo.
+
+### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--coder-provider` | inherits main | `ollama`, `openrouter`, `openai` (Claude/Gemini: route via OpenRouter) |
+| `--coder-model` | inherits main | Model name for the coder LLM |
+| `--coder-key` | inherits main key | API key override for the coder provider |
+| `--coder-knowledge` | `scripts/coder_knowledge/` | Path to the read-only knowledge base |
+| `--search-provider` | `duckduckgo` | `duckduckgo` or `brave` |
+| `--search-key` | — | Brave Search API key |
+| `--pixabay-key` | — | Pixabay API key for image search |
+
+### Tool reference
+
+**Tier: auto** — executed without confirmation
+
+| Tool | What it does |
+|------|-------------|
+| `read_file(path)` | Read any file in `scripts/`, `saves/`, `images/`, `my_scripts/` |
+| `list_files(pattern)` | Glob file listing, e.g. `scripts/lib/*.lua` |
+| `find_definition(symbol)` | grep for function/variable definition |
+| `find_usages(symbol)` | Recursive grep across codebase |
+| `check_lua_syntax(code)` | Validate Lua snippet via `luajit` |
+| `read_knowledge(topic)` | Read a knowledge base file (lua_api, lib_adventure, patterns…) |
+| `update_coder_memory(content)` | Append a persistent note to `coder_memory.md` |
+| `get_game_state()` | Live game state: `get_status_for_ai()` + `get_state_snapshot()` |
+| `get_script_errors()` | Last 20 Lua errors captured during the session |
+| `web_search(query)` | Web search via DuckDuckGo (or Brave with key) |
+| `search_images(query)` | Image search; results shown as thumbnails inline |
+| `analyze_image(path, question?)` | Vision LLM description of a local image or URL |
+| `t2i_reference(action, char_id?, file?)` | List/check/add/build face references on t2i_locale server |
+
+**Tier: confirm** — shown in an approval modal before execution
+
+| Tool | What it does |
+|------|-------------|
+| `write_file(path, content)` | Create a new file (diff preview) |
+| `str_replace(path, old, new)` | Surgical text replacement (colored diff preview) |
+| `run_lua(code, timeout_s?)` | Execute Lua in a sandbox (separate state, no game access) |
+| `eval_lua(code)` | Execute Lua on the **live game state** (surgical state fixes) |
+| `call_undo(steps?)` | Undo last N game turns via in-memory undo stack (max 10) |
+| `load_save(filename)` | Load a JSONL save file — enables deep undo with `--save-mode full` |
+| `download_asset(url, path)` | Download an image from a URL and save as a local asset |
+| `copy_file(src, dst)` | Copy a file (useful to reuse assets across adventures) |
+| `generate_image(prompt, path)` | Text-to-image via configured t2i provider |
+| `edit_image(input, instruction, output?)` | Image-to-image edit via configured i2i provider |
+| `generate_portrait(prompt, path, char_id?, id_scale?)` | NPC portrait with face conditioning (t2i_locale server) |
+| `generate_scene(prompt, chars[], path)` | Multi-NPC scene with face conditioning (t2i_locale server) |
+| `reload_script(preserve_state?)` | Hot-reload active Lua script; optionally preserve game state |
+
+**Tier: danger** — requires explicit confirmation
+
+| Tool | What it does |
+|------|-------------|
+| `delete_file(path)` | Permanently delete a file |
+
+### Typical workflow
+
+**Fix a bug mid-session (without stopping the game):**
+
+1. Player notices something wrong (wrong location, NPC ignoring time, tool never called)
+2. Open CoderAI tab → describe the symptom
+3. CoderAI calls `get_game_state` + `get_script_errors` → sees live state and recent errors
+4. Reads relevant code with `read_file` / `find_definition`
+5. Proposes a fix via `str_replace` (you see the diff, approve or deny)
+6. Calls `reload_script(preserve_state=true)` → script reloaded, game continues
+
+**Create a new NPC portrait:**
+
+1. Ask CoderAI to check available references: `t2i_reference("list")`
+2. Generate a portrait: `generate_portrait("Jenny, 22, barista, sorridendo", "my_scripts/images/jenny.png", char_id="jenny")`
+3. Optionally refine: `edit_image("my_scripts/images/jenny.png", "make the background a café interior")`
+4. Wire it into the script: `str_replace` in `get_asset_path("jenny")` to point to the new file
+
+**Research and implement a new feature:**
+
+1. Ask CoderAI how a library works → calls `read_knowledge("lib_adventure")` and `read_file("scripts/lib/adventure.lua")`
+2. Search for examples online → `web_search("Lua RPG inventory system patterns")`
+3. Writes the code, checks syntax → `check_lua_syntax(code)`
+4. Writes to file → `write_file` or `str_replace`
+5. Reloads → `reload_script`
+
+### Knowledge base
+
+`scripts/coder_knowledge/` is a read-only directory of Markdown files that CoderAI reads on demand via `read_knowledge(topic)`. It covers every Lua library API, mandatory patterns, the `§DECISIONS` checklist and the template reference. The knowledge base is versioned with the repo.
+
+`scripts/coder_memory.md` is a writable, gitignored file where CoderAI stores persistent notes across sessions (preferred patterns, in-progress work, user preferences). CoderAI appends to it autonomously via `update_coder_memory`.
+
+### Limitations
+
+- **Hot-reload does not reload lib files** (`adventure.lua`, `persona.lua`, etc.) — `require` caches them. Lib changes need an engine restart.
+- **`eval_lua` accesses globals only** — `state`, `agents` and similar locals in the script are not visible. Use `get_game_state()` (which calls the public Lua functions) or `run_lua` for analysis.
+- **One CoderAI session per engine instance** — history resets on `[Reset Chat]` or engine restart.
+- **`my_scripts/` in the path whitelist is hardcoded** — intended for private adventures not committed to the repo. Make it configurable before sharing a public deployment.
+
+---
+
+## 🔒 Security notes
+
+The web server (`--web`) is built for **local single-user** use and binds to `localhost:8080`. Two guards protect it:
+
+- **CSRF guard.** Some endpoints are powerful — `/api/servers/action` runs shell commands to install/start helper servers, the CoderAI endpoints write files and run Lua, and game turns can spend cloud LLM credits. Any web page open in your browser could otherwise POST to `localhost:8080` (cross-site request forgery). The engine rejects any state-changing `POST` whose `Origin`/`Referer` is not the RpgAi page itself (HTTP 403). The built-in UI is unaffected; command-line clients such as `curl` (which send no `Origin`) are also allowed, since they already have local machine access.
+- **CoderAI sandbox.** `run_lua` executes in an isolated Lua state with no filesystem or process access (`io`/`os.execute`/`os.remove`/`loadfile` removed) and a wall-clock timeout that the executed code cannot disable. File tools (`read_file`, `write_file`, `delete_file`, …) are restricted to the `scripts/`, `saves/`, `images/`, and `my_scripts/` trees, with symlink-escape resolution.
+
+This hardens the localhost setup but is **not** an authentication layer. Do not expose the port to an untrusted network without putting it behind a reverse proxy with real auth.
+
+---
+
 ## 🧪 Testing your script
 
 `tools/test_player.py` is an automated test player that uses an LLM (via OpenRouter) to drive playthroughs of any adventure script. Useful for QA testing and pre-generating scene images before release.
@@ -338,6 +480,7 @@ Key options: `--image-every N` (generate images every N turns), `--collect-image
 - [x] Persistent memory — `lib/memory.lua`; cross-session entity/category facts; tool-call writable
 - [x] Procedural world — `lib/world.lua` + `lib/persona.lua`; on-demand generation; file-backed NPCs
 - [x] Tool calling — `lib/tools.lua`; pre-built dice/skill/inventory tools; custom tool schema
+- [x] CoderAI — in-browser coding assistant; file tools, game bridge, Lua sandbox, image generation/editing, web search
 
 ---
 

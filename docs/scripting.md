@@ -133,6 +133,43 @@ function get_asset_prompt(id) -- returns {path, prompt} for text-to-image genera
 
 ---
 
+## Beyond the basics — framework, NPCs, tools
+
+Everything above is **MODE A**: a single JSON schema, no tools, the LLM fills in fields like `new_location` directly. It's the fastest way to a working game and the easiest for a small local model to drive reliably, but it doesn't scale well past a handful of locations/NPCs — you end up hand-rolling navigation, NPC memory, and inventory validation yourself, as `fantasy_demo.lua` does.
+
+For anything bigger, don't build on the minimal contract by hand. Start from `scripts/template_min.lua` and `scripts/lib/quickstart.lua`'s `quick.define(spec)`: one declarative Lua table installs the *entire* script contract — init order, navigation, NPC wiring, save/restore, tool definitions — for you. See the header of `quickstart.lua` for the full spec reference.
+
+```lua
+local quick = require("lib/quickstart")
+
+quick.define({
+    title   = "The Lighthouse",
+    welcome = "You arrive at a lighthouse on a storm-lashed cliff...",
+    npcs = {
+        keeper = { name = "Old Mara", personality = "Gruff, superstitious, hides a secret" },
+    },
+    locations = {
+        cliff_path = { name = "Cliff Path", description = "...", exits = { tower="tower" } },
+        tower      = { name = "The Tower",  description = "...", exits = { cliff_path="cliff_path" } },
+    },
+})
+```
+
+`quick.define` builds on a lower layer worth knowing about once you need something the declarative spec doesn't cover:
+
+- **`scripts/lib/adventure.lua`** — the MODE B/C framework. Instead of the LLM writing `new_location` into JSON, it calls **tools** (`move_player`, `move_npc`, `advance_time`, `remember`, …) — more reliable with capable models, and the schema shrinks to just `narration` + flags. Handles BFS navigation, NPC positions, notes, save/restore boilerplate.
+- **`scripts/lib/persona.lua`** — NPCs as individual files on disk (`scripts/npcs/<id>.lua`), hand-authored or LLM-generated on demand, growing over time (routine, relationships, life events). `scripts/lib/world.lua` does the same for locations/objects — generated procedurally when the player goes somewhere that doesn't exist yet.
+- **`scripts/lib/agent.lua`** — LLM-driven NPC reactions (`think_as_npc` tool), composed with code-driven routines rather than replacing them. **`scripts/lib/memory.lua`** — persistent facts per NPC, read by agents, written by the main LLM via a tool call.
+- **`get_tools()`** — return a list of tool definitions (`scripts/lib/tools.lua` has the schema + pre-built tools) to let the LLM call functions instead of only emitting narration.
+- **`before_ai_turn(input)` / `after_ai_turn(narration, reply)`** — optional hooks for code-driven side effects (NPC ticks, event scheduling) around the LLM call.
+- **`get_character_questions()`** — optional scripted questionnaire (name, appearance, …) shown before the game starts, replacing a single free-text name prompt; paired with `generate_arrival()` for an LLM-narrated opening scene.
+
+Debugging a bigger script: `scripts/lib/gamelog.lua` writes a human-readable turn-by-turn log to disk (`adv.set_config({log_file=...})`) — much easier to scan than `session_log.jsonl`. **[CoderAI](../CODERAI.md)** is an in-browser assistant (own chat panel in the web UI) that can read/write your script, run syntax checks, and query game state directly — useful for iterating without leaving the browser.
+
+None of this is required — `fantasy_demo.lua`'s plain MODE A style is still the right choice for a short, simple adventure.
+
+---
+
 ## C++ functions exposed to Lua
 
 #### `query_llm(sys, history_json, user, schema) → string`
@@ -186,6 +223,8 @@ end
 ---
 
 ## NPC scheduling pattern
+
+A hand-rolled routine table, useful for a MODE A script with a couple of NPCs. For more than that — or if NPCs need to react/remember things — see [`persona.lua`'s routine system](#beyond-the-basics--framework-npcs-tools) instead of extending this by hand.
 
 ```lua
 local NPC_ROUTINES = {

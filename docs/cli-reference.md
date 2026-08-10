@@ -23,10 +23,27 @@ All configuration is passed via command-line flags. No config files — every op
 | `--max-retries <n>` | `3` | Retries per turn if the LLM returns invalid JSON |
 | `--lang <code>` | — | Language code for LLM responses (`it`, `fr`, `de`, …). Appends a "respond in X" instruction to every system prompt. |
 | `--lang-file <file>` | `lang.txt` | Path to the language instruction file |
+| `--asset-root <path>` | *(cwd)* | Base dir for `asset/` & `catalog/` — lets `--path` point elsewhere while assets stay absolute |
+| `--help` | — | Print this reference and exit |
 
 **Save modes:**
 - `last` — always exactly one line: the most recent turn. Fast, minimal disk use.
 - `full` — every turn appended. Use this to build a RAG corpus (`--rag`).
+
+---
+
+## Web server options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--web` | off | REST server (Crow) + auto-open the browser UI |
+| `--rest` | off | Same REST server, headless — no browser auto-open. Pair with a native client (e.g. `rpgai-gui`) instead of the browser |
+| `--port <n>` | `8080` | Web server port |
+| `--llm-timeout <s>` | `120` | Per-request LLM timeout (seconds) |
+| `--max-output-tokens <n>` | `1024` | Cap completion tokens per LLM call (`0` = provider default). Without a cap a degenerating model can stream to the provider's max — minutes-long hangs, "void" output, and a large token bill |
+| `--debug-gui` | off | Enable GUI debug routes (NPC possess/action injection) |
+
+`--web` and `--rest` expose the identical `/api/*` surface; only browser auto-open differs.
 
 ---
 
@@ -88,6 +105,49 @@ Example — Ollama embedding with OpenRouter for text generation:
 
 ---
 
+## Model tier options
+
+Give different roles a different model/provider — e.g. a strong model for one-off entity generation, a cheap one for the high-volume roles (NPC agents fire on nearly every turn; ambient events fire off-screen). Any tier left unset falls back to the main `--provider`/`--model`.
+
+```bash
+--gen-model <m>          --gen-provider <p>       # entity generation (persona/world) — strong model
+--agent-model <m>        --agent-provider <p>     # NPC agents (think_as_npc) — cheap model
+--ambient-model <m>      --ambient-provider <p>   # NPC↔NPC ambient events — cheapest model
+```
+
+Also editable live from the web Settings panel (no restart needed). See `/cost` in-game (or `get_token_usage()`) to see where tokens actually go before picking tiers.
+
+---
+
+## CoderAI options
+
+In-browser coding assistant (see [CoderAI](../CODERAI.md)). Requires `--coder-provider` to be `ollama`, `openrouter` or `openai` (tool-calling wire format) — route Claude/Gemini through OpenRouter.
+
+```bash
+--coder-provider <n>            # ollama|openrouter|openai (default: inherits --provider, if compatible)
+--coder-model <n>               # default: inherits --model
+--coder-key <key>                # default: inherits the main provider's key
+--coder-path <dir>              # knowledge base dir (default: <--path>/coder_knowledge/,
+                                 # falling back to <--asset-root>/scripts/coder_knowledge/)
+--coder-persona <text>          # personality/identity prefix (default: built-in; editable in web Preferenze)
+--coder-vision-provider <n>     # provider for image analysis (analyze_image tool)
+--coder-vision-model <n>        # model for image analysis
+```
+
+`--coder-path` matters most when `--path` points somewhere other than `scripts/` (e.g. `my_scripts/`) — without it, CoderAI can't find the knowledge base and works blind.
+
+---
+
+## Web search & stock images (CoderAI tools)
+
+```bash
+--search-provider <n>    # duckduckgo|brave (default: duckduckgo)
+--search-key <key>       # required for brave
+--pixabay-key <key>      # enables search_images tool (stock photo lookup)
+```
+
+---
+
 ## RAG options
 
 ```bash
@@ -119,6 +179,11 @@ Different providers can be used for each.
 --img-height <n>          # default: 1024
 --img-steps <n>           # default: 28
 --img-strength <f>        # i2i denoising strength 0.0–1.0 (default: 0.75)
+--img-lora <name>         # LoRA name/path (provider-dependent)
+--img-lora-scale <f>      # LoRA weight (default: 1.0)
+--i2i-model-lora <name>   # LoRA specifically for the i2i model
+--img-i2i-steps <n>       # i2i step count override (default: 0 = use --img-steps)
+--img-guidance-scale <f>  # CFG/guidance scale (default: 1.0)
 ```
 
 #### Separate i2i provider (optional)
@@ -141,6 +206,17 @@ Different providers can be used for each.
 | `dashscope` | ✓ | ✓ | Alibaba Cloud |
 | `aimlapi` | ✓ | ✓ | AIML API gateway |
 | `qwen_local` | — | ✓ | Local Qwen-based image editing server |
+
+---
+
+## Local server URLs
+
+Optional local Python servers, manageable from the web UI (start/stop, install deps). Each has its own repo folder (`tts_locale/`, `faceswap_locale/`) with its own `server.py`.
+
+```bash
+--tts-url <url>          # XTTS v2 TTS server (voice synthesis, /api/tts)
+--faceswap-url <url>     # faceswap_locale server
+```
 
 ---
 

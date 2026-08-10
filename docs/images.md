@@ -271,6 +271,47 @@ Access to FLUX 1.1 Pro, SDXL and others.
 --img-t2i-model black-forest-labs/flux-1.1-pro
 ```
 
+### OpenAI (`openai`) — t2i and i2i
+DALL-E 3 / GPT-image. i2i via the multipart `/v1/images/edits` endpoint.
+```bash
+--img-provider openai --img-key sk-YOUR_KEY --img-t2i-model gpt-image-1
+```
+
+### DashScope (`dashscope`) — Alibaba Cloud
+```bash
+--img-provider dashscope --img-key YOUR_KEY --img-t2i-model wanx-v1
+```
+
+### AIMLAPI (`aimlapi`) — gateway to multiple image models
+```bash
+--img-provider aimlapi --img-key YOUR_KEY --img-t2i-model flux/dev
+```
+
+### `qwen_local` — local Qwen-based i2i server
+i2i only, no t2i. Pairs with `t2i_locale/` (own FLUX + PuLID pipeline for t2i) for a fully local setup — see that server's own docs.
+```bash
+--img-i2i-provider qwen_local --img-i2i-url http://localhost:PORT
+```
+
+---
+
+## LoRA options
+
+For providers that support them (local servers mainly):
+```bash
+--img-lora <name>          # LoRA name/path
+--img-lora-scale <f>       # LoRA weight, default 1.0
+--i2i-model-lora <name>    # LoRA specifically for the i2i pass
+--img-i2i-steps <n>        # i2i step count override (0 = use --img-steps)
+--img-guidance-scale <f>   # CFG/guidance scale, default 1.0
+```
+
+---
+
+## CoderAI image tools
+
+Beyond the per-turn scene pipeline above, [CoderAI](../CODERAI.md) (the in-browser coding assistant) has its own image tools for building/fixing assets while editing a script: `generate_image` (plain t2i), `edit_image` (i2i, bypasses the scene cache), `analyze_image` (vision-model Q&A on a local or external image), and — if a `t2i_locale` server is configured — `generate_portrait`/`generate_scene` (FLUX + IP-Adapter face-conditioned NPC portraits). These are approval-gated tool calls in the CoderAI chat, not CLI flags.
+
 ---
 
 ## Tips
