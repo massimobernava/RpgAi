@@ -15,6 +15,7 @@ saves/
 
 # Claude Code project instructions (internal, not for public repo)
 CLAUDE.md
+CLAUDE.original.md
 
 # Generated scene images (cache rebuilt at runtime)
 scripts/images/
@@ -30,15 +31,20 @@ imgui.ini
 my_scripts/
 my_tools/
 
-# Launch scripts containing API keys.
+# Launch scripts with machine-specific config.
 # Commit a *.sh.template with placeholders instead.
 openrouter_web.sh
+openrouter_rest.sh
 console_test.sh
 final_test_narration.sh
 rpgai_qwen36_remote.sh
+local_web.sh
 
 # Settings file — contains API keys
 rpgai_settings.json
+
+# CoderAI persistent notes — local dev memory only.
+scripts/coder_memory.md
 
 # GitHub token
 .github_token
@@ -48,7 +54,7 @@ npc_mod/
 narrative/
 guida/
 
-# Internal playtesting log (contains private script details)
+# Internal playtesting log
 PLAYTESTING_INTERNAL.md
 PLAYTESTING_OPENCODE_DEEPSEEK.md
 test_api.py
@@ -63,11 +69,24 @@ pipeline_stages/
 pipeline_native/
 
 # Native GUI frontend (rpgai-gui) — experimental, not ready for public release
+GUI_VISION.md
 src/gui_main.cpp
 src/gui_objects.h
 src/gui_sprite.h
 src/gui_tilemap.h
 src/gui_visual.h
+src/gui_windows.h
+src/gui_labs.h
+gui_tools/
+src/gui_coder.h
+src/gui_faceswap.h
+src/gui_filepicker.h
+src/gui_location_editor.h
+src/gui_npc_editor.h
+src/gui_object_editor.h
+src/gui_settings.h
+src/gui_vn.h
+src/gui_vn_editor.h
 scripts/lib/visual.lua
 vendor/imgui/
 vendor/rllmGui/
@@ -81,10 +100,40 @@ tts_locale/voice/
 # Generated images from qwen_locale (test outputs)
 qwen_locale/*.png
 
-# t2i_locale — private NPC reference faces, generated outputs, downloaded models
+# t2i_locale — generated/reference data, downloaded models
 t2i_locale/references/
 t2i_locale/output/
 t2i_locale/models/
 
+# faceswap_locale — allowlist pattern on purpose (avoid enumerating folders).
+# Ignore everything, explicitly keep only the source files.
+faceswap_locale/*
+!faceswap_locale/*.py
+!faceswap_locale/*.sh
+!faceswap_locale/*.md
+!faceswap_locale/requirements.txt
+
 # Local script copies with spaces in name
 *\ copia.*
+
+# LimeZu asset pack — licensed, never distribute (see asset/LICENSE.txt)
+asset/
+
+# Catalog: contact sheets / drafts are derived from licensed assets — never distribute
+catalog/sheets/
+catalog/objects_draft.json
+catalog/describe_state.json
+
+# Per-adventure VN catalogs (auto-scaffold default path). vn_scene.json
+# (generic demo catalog) is the one exception and stays tracked.
+catalog/*_vn.json
+
+# Catalog: tile-mode object/room-generation data (visual_gen.lua) — tile mode
+# is frozen, dropped from tracking.
+catalog/objects.json
+catalog/characters.json
+catalog/characters_draft.json
+catalog/chars_describe_state.json
+catalog/describe_state.json.bak
+catalog/placement_state.json
+catalog/walls.json
