@@ -34,7 +34,10 @@ local function json_repair(input)
         -- Find the matching closing bracket
         local open_char  = s:sub(start_pos, start_pos)
         local close_char = open_char == "{" and "}" or "]"
-        local last_close = s:find(".*%" .. close_char)
+        -- find returns (start, END): the end of the greedy match is the
+        -- position of the LAST closing bracket. Using the first return value
+        -- here would truncate the JSON to its first character.
+        local _, last_close = s:find(".*%" .. close_char)
         if last_close then
             s = s:sub(start_pos, last_close)
         else

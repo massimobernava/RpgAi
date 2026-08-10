@@ -1,0 +1,31 @@
+{
+  "_comment": "Pillar 2 — object placement rules (designer-in-the-loop). Resolved by visual_gen.M.object_rules: per CATEGORY and per NAME_CONTAINS token (matched in id + name_it). Fields: max_per_room (int), rooms (whitelist of room_type), group (explicit count key). Edit here (or via the catalog editor) when the furnisher repeats a mistake.",
+  "version": 1,
+  "category": {
+    "bed":  { "max_per_room": 1 },
+    "rug":  { "max_per_room": 1 }
+  },
+  "match": [
+    { "name_contains": "toilet",   "max_per_room": 1, "rooms": ["bagno"] },
+    { "name_contains": "wc",       "max_per_room": 1, "rooms": ["bagno"] },
+    { "name_contains": "water",    "max_per_room": 1, "rooms": ["bagno"], "group": "toilet" },
+    { "name_contains": "bathtub",  "max_per_room": 1, "rooms": ["bagno"] },
+    { "name_contains": "vasca",    "max_per_room": 1, "rooms": ["bagno"], "group": "bathtub" },
+    { "name_contains": "shower",   "max_per_room": 1, "rooms": ["bagno"] },
+    { "name_contains": "doccia",   "max_per_room": 1, "rooms": ["bagno"], "group": "shower" },
+    { "name_contains": "sink",     "max_per_room": 2 },
+    { "name_contains": "lavandino","max_per_room": 2, "group": "sink" },
+    { "name_contains": "fridge",   "max_per_room": 1, "rooms": ["cucina"] },
+    { "name_contains": "frigo",    "max_per_room": 1, "rooms": ["cucina"], "group": "fridge" },
+    { "name_contains": "stove",    "max_per_room": 1, "rooms": ["cucina"] },
+    { "name_contains": "fornell",  "max_per_room": 1, "rooms": ["cucina"], "group": "stove" },
+    { "name_contains": "oven",     "max_per_room": 1, "rooms": ["cucina"] },
+    { "name_contains": "forno",    "max_per_room": 1, "rooms": ["cucina"], "group": "oven" },
+    { "name_contains": "fireplace","rooms": ["salotto", "studio", "camera"] },
+    { "name_contains": "camino",   "rooms": ["salotto", "studio", "camera"] },
+    { "name_contains": "sofa",     "max_per_room": 2, "rooms": ["salotto", "studio"] },
+    { "name_contains": "divano",   "max_per_room": 2, "rooms": ["salotto", "studio"], "group": "sofa" },
+    { "name_contains": "tv",       "max_per_room": 1 },
+    { "name_contains": "televis",  "max_per_room": 1, "group": "tv" }
+  ]
+}

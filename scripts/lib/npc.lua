@@ -235,6 +235,7 @@ function NPC.new(name, config, world_adapter, opts)
     self.pending_events   = {}
     self.engaged          = false
     self.memory           = {}
+    self._var_cooldowns   = {}   -- { "ri_vi" -> turns_remaining } variation cooldown tracker
 
     -- Init stats from config defaults
     for k, v in pairs(config.stats_defaults or {}) do
@@ -304,8 +305,13 @@ function NPC:_protagonistHere(loc, protagonist_loc)
 end
 
 -- Build update result table
-local function make_result(activity, loc, hint)
-    return { activity = activity or "", location = loc or "", narrative_hint = hint }
+-- opts (optional): { llm=bool, situation=string } — surfaced so a driver can
+-- decide whether this scripted beat should be enriched by an LLM call (Phase 1
+-- of the multi-narrator design: some scripted actions invoke the agent).
+local function make_result(activity, loc, hint, opts)
+    local res = { activity = activity or "", location = loc or "", narrative_hint = hint }
+    if opts then res.llm = opts.llm; res.situation = opts.situation end
+    return res
 end
 
 -- ---------------------------------------------------------------------------
@@ -373,7 +379,8 @@ function NPC:update(time_str, day_str, protagonist_loc)
                     self.current_step     = nil
                 end
 
-                return make_result(step.activity, loc, hint)
+                return make_result(step.activity, loc, hint,
+                    { llm = step.llm, situation = step.situation })
             end
         end
     end
@@ -402,7 +409,8 @@ function NPC:update(time_str, day_str, protagonist_loc)
                     self.current_step     = 1
                     return make_result(
                         opt.description or "feels a pressing need and acts on it",
-                        self:_myLoc(), nil)
+                        self:_myLoc(), nil,
+                        { llm = opt.llm, situation = opt.situation })
                 end
             end
         end
@@ -411,7 +419,13 @@ function NPC:update(time_str, day_str, protagonist_loc)
     -- -----------------------------------------------------------------------
     -- 3. ROUTINE — time and day based activities
     -- -----------------------------------------------------------------------
-    for _, r in ipairs(self.config.routine or {}) do
+    -- decrement all active cooldowns once per tick
+    for k, v in pairs(self._var_cooldowns) do
+        if v > 0 then self._var_cooldowns[k] = v - 1
+        elseif v == 0 then self._var_cooldowns[k] = nil end
+    end
+
+    for ri, r in ipairs(self.config.routine or {}) do
         if day_ok(r.day, day_str) and time_between(time_str, r.time[1], r.time[2]) then
 
             -- move to location
@@ -427,7 +441,14 @@ function NPC:update(time_str, day_str, protagonist_loc)
 
             -- try variations (first match wins by default; random otherwise)
             if r.variations then
-                for _, v in ipairs(r.variations) do
+                for vi, v in ipairs(r.variations) do
+                    local vkey = ri .. "_" .. vi
+                    -- cooldown_turns: <=0 = one-shot (never repeat once fired)
+                    --                  >0 = skip for N ticks after firing
+                    if self._var_cooldowns[vkey] then
+                        -- still cooling down (or permanently blocked if sentinel -1)
+                        goto next_variation
+                    end
                     -- prob_boost_when: { stat="stress", min=0.5, boosted_prob=0.7 }
                     -- when the condition is met, replaces the base prob with boosted_prob
                     local prob_ok
@@ -441,6 +462,14 @@ function NPC:update(time_str, day_str, protagonist_loc)
                         prob_ok = (not v.prob) or math.random() < v.prob
                     end
                     if prob_ok and self:_check(v.condition) then
+                        -- set cooldown if defined
+                        if v.cooldown_turns then
+                            if v.cooldown_turns <= 0 then
+                                self._var_cooldowns[vkey] = -1  -- permanent block
+                            else
+                                self._var_cooldowns[vkey] = v.cooldown_turns
+                            end
+                        end
                         self:_applyStats(v.stats)
                         self:_emit(v.event, v.info)
 
@@ -450,8 +479,11 @@ function NPC:update(time_str, day_str, protagonist_loc)
                         if self:_protagonistHere(loc, protagonist_loc) then
                             hint = v.narrative_hint or act
                         end
-                        return make_result(act, loc, hint)
+                        return make_result(act, loc, hint,
+                            { llm = (v.llm ~= nil) and v.llm or r.llm,
+                              situation = v.situation or r.situation })
                     end
+                    ::next_variation::
                 end
             end
 
@@ -462,7 +494,8 @@ function NPC:update(time_str, day_str, protagonist_loc)
             if self:_protagonistHere(loc, protagonist_loc) then
                 hint = r.narrative_hint or r.activity
             end
-            return make_result(r.activity, loc, hint)
+            return make_result(r.activity, loc, hint,
+                { llm = r.llm, situation = r.situation })
         end
     end
 
@@ -484,7 +517,19 @@ end
 function NPC:onEvent(event_name, info, protagonist_loc)
     local reactions = self.config.event_reactions or {}
     local reaction  = reactions[event_name]
-    if not reaction then return { activity = nil, narrative_hint = nil } end
+    if not reaction then
+        -- Generic hook, no LLM/persona knowledge here: an event with no
+        -- reaction defined is a REAL, verified occurrence (it came from an
+        -- actual dispatch) — the ideal, orphan-free trigger to learn one.
+        -- The composing layer (persona.lua) wires this to count occurrences
+        -- and generate a reaction on a real repeat. Never throws into the
+        -- tick: any hook error is swallowed, a missing reaction stays a
+        -- harmless no-op either way.
+        if self.config.on_unhandled_event then
+            pcall(self.config.on_unhandled_event, self, event_name, info)
+        end
+        return { activity = nil, narrative_hint = nil }
+    end
 
     self:_applyStats(reaction.stats)
 
@@ -606,6 +651,7 @@ function NPC:snapshot()
         current_step     = self.current_step,
         engaged          = self.engaged,
         memory           = self.memory,
+        var_cooldowns    = self._var_cooldowns,
     })
 end
 
@@ -618,6 +664,7 @@ function NPC:restore(data)
     if s.current_step     then self.current_step     = s.current_step     end
     if s.engaged ~= nil   then self.engaged          = s.engaged          end
     if s.memory           then self.memory           = s.memory           end
+    if s.var_cooldowns    then self._var_cooldowns    = s.var_cooldowns    end
 end
 
 -- ---------------------------------------------------------------------------

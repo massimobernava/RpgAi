@@ -138,6 +138,11 @@ std::string main_page = R"HTML(<!DOCTYPE html>
                    font-size: 13px; max-width: 60%; }
   .msg-system    { background: transparent; color: var(--dim); font-size: 12px;
                    border-left: 2px solid var(--border); padding: 4px 10px; }
+  .choice-box    { border-left: none !important; padding: 2px 10px !important; }
+  .choice-btn    { background: var(--hud-bg); border: 1px solid var(--accent);
+                   color: var(--text); border-radius: 6px; padding: 5px 11px;
+                   font-size: 13px; cursor: pointer; }
+  .choice-btn:hover { background: rgba(124,111,205,.22); }
   .msg-command   { background: var(--hud-bg); border: 1px solid var(--border);
                    color: var(--accent2); white-space: pre-wrap; }
   .msg-error     { background: rgba(229,92,108,.1); border: 1px solid var(--danger);
@@ -278,6 +283,123 @@ std::string main_page = R"HTML(<!DOCTYPE html>
   .btn-upload { background: transparent; color: var(--accent2);
                 border: 1px solid var(--accent2); font-size: 11px; padding: 6px; }
   .btn-upload:hover { background: rgba(79,195,161,.1); }
+
+  /* ---- Main tabs (Game / CoderAI) ---- */
+  #main-tabs { display: flex; border-bottom: 1px solid var(--border);
+               background: var(--surface); flex-shrink: 0; }
+  .main-tab  { padding: 10px 18px; font-size: 12px; cursor: pointer; color: var(--dim);
+               letter-spacing: .06em; border-bottom: 2px solid transparent;
+               transition: color .15s; user-select: none; }
+  .main-tab:hover  { color: var(--text); }
+  .main-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* ---- Panels ---- */
+  #game-panel  { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  #coder-panel { display: none; flex-direction: column; flex: 1; min-height: 0; }
+  #coder-panel.visible { display: flex; }
+
+  /* ---- CoderAI config bar ---- */
+  #coder-config { display: flex; gap: 8px; padding: 8px 12px; align-items: center;
+                  border-bottom: 1px solid var(--border); background: var(--surface);
+                  flex-shrink: 0; flex-wrap: wrap; }
+  #coder-config label { color: var(--dim); font-size: 11px; white-space: nowrap; }
+  #coder-status-dot { font-size: 11px; color: var(--dim); margin-left: 4px; }
+
+  /* ---- CoderAI chat log ---- */
+  #coder-log { flex: 1; overflow-y: auto; padding: 16px 20px;
+               display: flex; flex-direction: column; gap: 14px; }
+  .coder-msg       { padding: 10px 14px; border-radius: var(--radius); font-size: 13px;
+                     line-height: 1.65; max-width: 88%; word-break: break-word; }
+  .coder-msg.user  { background: var(--surface); border: 1px solid var(--border);
+                     align-self: flex-end; color: var(--text); }
+  .coder-msg.ai    { background: #14141e; border: 1px solid var(--border);
+                     align-self: flex-start; color: var(--text); white-space: pre-wrap; }
+  .coder-msg.sys   { color: var(--dim); font-size: 11px; align-self: center;
+                     border: none; background: none; padding: 2px 0; }
+  .coder-msg.loading { color: var(--dim); font-style: italic; }
+
+  /* ---- CoderAI input area ---- */
+  #coder-input-area { display: flex; gap: 8px; padding: 10px 12px;
+                      border-top: 1px solid var(--border); background: var(--surface);
+                      flex-shrink: 0; align-items: flex-end; }
+  #coder-input { flex: 1; background: var(--bg); border: 1px solid var(--border);
+                 border-radius: var(--radius); color: var(--text); padding: 8px 12px;
+                 font-family: var(--mono); font-size: 13px; resize: none;
+                 min-height: 60px; max-height: 200px; line-height: 1.5; }
+  #coder-input:focus { outline: none; border-color: var(--accent); }
+  #coder-input::placeholder { color: var(--dim); }
+  #coder-input:disabled { opacity: .4; }
+  #btn-coder-send { width: auto; padding: 8px 16px; font-size: 15px; align-self: flex-end; flex-shrink: 0; }
+  #coder-at-hints { display: flex; gap: 6px; padding: 2px 12px 6px; background: var(--surface); flex-shrink: 0; }
+  #coder-at-hints span { font-size: 11px; color: var(--dim); background: var(--bg);
+                         border: 1px solid var(--border); border-radius: 3px; padding: 1px 6px;
+                         cursor: pointer; font-family: var(--mono); user-select: none; }
+  #coder-at-hints span:hover { color: var(--accent); border-color: var(--accent); }
+  #btn-coder-reset   { width: auto; }
+  #btn-coder-test    { width: auto; }
+  #btn-coder-compact { width: auto; }
+
+  /* ---- CoderAI body + file tree sidebar ---- */
+  #coder-body    { display: flex; flex: 1; min-height: 0; }
+  #coder-sidebar { width: 210px; min-width: 160px; border-right: 1px solid var(--border);
+                   overflow-y: auto; background: var(--bg); flex-shrink: 0; font-size: 12px;
+                   transition: width .15s; }
+  #coder-sidebar.hidden { width: 0; min-width: 0; overflow: hidden; border-right: none; }
+  #coder-main    { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .tree-sec-hdr  { padding: 6px 8px 2px; color: var(--dim); font-size: 10px;
+                   letter-spacing:.08em; text-transform:uppercase; user-select:none; }
+  .tree-item     { display: flex; align-items: center; gap: 5px; padding: 3px 8px;
+                   cursor: pointer; color: var(--dim); white-space: nowrap; overflow: hidden;
+                   text-overflow: ellipsis; }
+  .tree-item:hover { background: rgba(255,255,255,.04); color: var(--text); }
+  .tree-item.is-dir  { color: var(--accent2); }
+  .tree-item.is-img  { color: #c586c0; }
+  .tree-children     { padding-left: 12px; }
+  .tree-img-thumb    { width: calc(100% - 16px); max-height: 90px; object-fit: contain;
+                       border-radius: 3px; display: block; margin: 3px 8px 6px; background: var(--bg); }
+
+  /* ---- Tool badges ---- */
+  .coder-tools { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .tool-badge  { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
+                 border-radius: 10px; font-size: 11px; background: rgba(80,80,120,.18);
+                 border: 1px solid rgba(80,80,120,.35); color: var(--dim); }
+  .tool-badge.t-pending  { border-color: var(--warn);   color: var(--warn); }
+  .tool-badge.t-approved { border-color: var(--accent);  color: var(--accent); }
+  .tool-badge.t-denied   { border-color: #f48771; color: #f48771; text-decoration: line-through; }
+
+  /* ---- Diff in approval modal ---- */
+  .diff-block { font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+  .diff-add   { color: #4ec994; background: rgba(78,201,148,.08); display: block; white-space: pre-wrap; }
+  .diff-rem   { color: #f48771; background: rgba(244,135,113,.08); display: block; white-space: pre-wrap; }
+  .diff-ctx   { color: var(--dim); display: block; white-space: pre-wrap; }
+
+  /* ---- Image results grid ---- */
+  .coder-img-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  /* Local path images (analyze/edit results): full width, large */
+  .coder-img-grid.local-imgs .coder-img-card { width: 100%; max-width: 520px; cursor: pointer; }
+  .coder-img-grid.local-imgs .coder-img-card img { width: 100%; height: auto; object-fit: contain;
+                        border-radius: 4px; border: 1px solid var(--border); display: block; }
+  /* Search results: small thumbnails */
+  .coder-img-card { width: 110px; cursor: pointer; }
+  .coder-img-card img { width: 110px; height: 74px; object-fit: cover;
+                        border-radius: 4px; border: 1px solid var(--border); display: block; }
+  .coder-img-card .img-lbl { font-size: 10px; color: var(--dim); overflow: hidden;
+                              text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+  .coder-img-card:hover img { border-color: var(--accent); }
+
+  /* ---- CoderAI approval modal ---- */
+  #coder-approval-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7);
+                             z-index: 200; align-items: center; justify-content: center; }
+  #coder-approval-modal   { background: var(--surface); border: 1px solid var(--border);
+                             border-radius: var(--radius); padding: 20px; max-width: 560px; width: 90%;
+                             display: flex; flex-direction: column; gap: 14px; }
+  #coder-approval-title   { font-size: 14px; color: var(--warn); font-weight: bold; }
+  #coder-approval-preview { background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+                             padding: 10px; font-size: 12px; white-space: pre-wrap; max-height: 300px;
+                             overflow-y: auto; color: var(--text); }
+  #coder-approval-btns    { display: flex; gap: 10px; justify-content: flex-end; }
+  #btn-coder-approve { width: auto; background: var(--accent2); color: #000; }
+  #btn-coder-deny    { width: auto; }
 </style>
 </head>
 <body>
@@ -350,12 +472,67 @@ std::string main_page = R"HTML(<!DOCTYPE html>
 
   <!-- ===== MAIN ===== -->
   <div id="main">
-    <pre id="hud">Select a script and press Start, or load a saved game.</pre>
-    <div id="log"></div>
-    <div id="input-area">
-      <textarea id="input" rows="1" disabled
-        placeholder="Select a script to begin..."></textarea>
-      <button id="btn-send" disabled>➤</button>
+
+    <!-- Tab nav -->
+    <div id="main-tabs">
+      <div class="main-tab active" id="mtab-game"  onclick="switchMainTab('game')">⚔ Game</div>
+      <div class="main-tab"        id="mtab-coder" onclick="switchMainTab('coder')">⌨ CoderAI</div>
+    </div>
+
+    <!-- Game panel -->
+    <div id="game-panel">
+      <pre id="hud">Select a script and press Start, or load a saved game.</pre>
+      <div id="log"></div>
+      <div id="input-area">
+        <textarea id="input" rows="1" disabled
+          placeholder="Select a script to begin..."></textarea>
+        <button id="btn-send" disabled>➤</button>
+      </div>
+    </div>
+
+    <!-- CoderAI panel -->
+    <div id="coder-panel">
+      <div id="coder-config">
+        <span id="coder-model-label" title="Configurable in ⚙ Settings → LLM → Model tiers"
+              style="color:var(--dim);font-size:12px"></span>
+        <span id="coder-status-dot"></span>
+        <button title="Toggle file tree" onclick="toggleCoderTree()"
+                class="btn btn-ghost" style="margin-left:auto;width:auto;padding:4px 8px">📁</button>
+        <button id="btn-coder-test" class="btn btn-ghost" title="Testa tools e vision sul modello configurato">🔬 Test</button>
+        <button id="btn-coder-compact" class="btn btn-ghost" title="Compatta sessione in coder_memory.md">💾 Compatta</button>
+        <button id="btn-coder-reset" class="btn btn-ghost">↺ Reset</button>
+      </div>
+      <div id="coder-body">
+        <div id="coder-sidebar">
+          <div id="coder-tree-root"></div>
+        </div>
+        <div id="coder-main">
+          <div id="coder-log"></div>
+          <div id="coder-input-area">
+            <textarea id="coder-input"
+              placeholder="Ask CoderAI to write or modify a Lua adventure script... (Enter = send, Shift+Enter = newline)"></textarea>
+            <button id="btn-coder-send" class="btn btn-primary">➤</button>
+          </div>
+          <div id="coder-at-hints">
+            <span title="Inject current game state JSON into this message">@state</span>
+            <span title="Inject last 10 lines of the game log (@log:N for N lines)">@log</span>
+            <span title="Inject recent Lua script errors">@errors</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ===== CODERAI APPROVAL MODAL ===== -->
+  <div id="coder-approval-overlay">
+    <div id="coder-approval-modal">
+      <div id="coder-approval-title">Approval required</div>
+      <pre id="coder-approval-preview"></pre>
+      <div id="coder-approval-btns">
+        <button id="btn-coder-deny"    class="btn btn-ghost"    onclick="coderDeny()">✕ Deny</button>
+        <button id="btn-coder-approve" class="btn btn-primary"  onclick="coderApprove()">✓ Approve</button>
+      </div>
     </div>
   </div>
 
@@ -417,6 +594,58 @@ std::string main_page = R"HTML(<!DOCTYPE html>
               <div class="sfield"><label>Model</label><input id="s-g-model" type="text" placeholder="gemini-flash-latest"></div>
               <div class="sfield"><label>API Key</label><input id="s-g-key" type="password"></div>
             </div>
+          </div>
+
+          <h4 style="margin:14px 0 4px">Model tiers <span style="font-weight:normal;opacity:.6">(empty = use main model above)</span></h4>
+          <div class="srow">
+            <div class="sfield"><label>Generation model <span style="opacity:.6">(NPC/world — strong)</span></label>
+              <input id="s-gen-model" type="text" placeholder="e.g. anthropic/claude-sonnet-4-6"></div>
+            <div class="sfield"><label>Provider</label>
+              <select id="s-gen-provider">
+                <option value="">(main)</option>
+                <option value="ollama">Ollama</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai">OpenAI</option>
+                <option value="claude">Claude</option>
+                <option value="gemini">Gemini</option>
+              </select></div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>Agent model <span style="opacity:.6">(think_as_npc — cheap)</span></label>
+              <input id="s-agent-model" type="text" placeholder="e.g. google/gemini-2.5-flash"></div>
+            <div class="sfield"><label>Provider</label>
+              <select id="s-agent-provider">
+                <option value="">(main)</option>
+                <option value="ollama">Ollama</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai">OpenAI</option>
+                <option value="claude">Claude</option>
+                <option value="gemini">Gemini</option>
+              </select></div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>Ambient model <span style="opacity:.6">(NPC↔NPC — cheapest)</span></label>
+              <input id="s-ambient-model" type="text" placeholder="e.g. google/gemini-2.5-flash-lite"></div>
+            <div class="sfield"><label>Provider</label>
+              <select id="s-ambient-provider">
+                <option value="">(main)</option>
+                <option value="ollama">Ollama</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai">OpenAI</option>
+                <option value="claude">Claude</option>
+                <option value="gemini">Gemini</option>
+              </select></div>
+          </div>
+          <div class="srow">
+            <div class="sfield"><label>CoderAI model</label>
+              <input id="s-coder-model" type="text" placeholder="empty = main model"></div>
+            <div class="sfield"><label>Provider <span style="opacity:.6">(tool-calling: not claude/gemini direct)</span></label>
+              <select id="s-coder-provider">
+                <option value="">(main)</option>
+                <option value="ollama">Ollama</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="openai">OpenAI</option>
+              </select></div>
           </div>
         </div>
 
@@ -727,6 +956,11 @@ let activeAudios   = [];     // all playing audio instances
 let ttsNarratorVoice = '';   // set from settings; empty = TTS disabled in UI
 const ttsCache     = new Map(); // key: voice|text → ArrayBuffer (session-local cache)
 
+// Character-creation questionnaire (driven by get_character_questions()).
+let charQuestions  = [];     // [{field, prompt, type, options?}]
+let charAnswers    = {};     // field → answer string
+let charQIdx       = 0;      // index of the question awaiting an answer
+
 function stopAllAudio() {
   activeAudios.forEach(a => { try { a.pause(); } catch(e){} });
   activeAudios = [];
@@ -767,6 +1001,89 @@ function setInputEnabled(on) {
   busy             = !on;
   inp.disabled     = !on;
   btnSend.disabled = !on;
+}
+
+/* ================================================================
+   CHARACTER-CREATION QUESTIONNAIRE
+   ================================================================ */
+function startQuestionnaire(questions) {
+  charQuestions = questions;
+  charAnswers   = {};
+  charQIdx      = 0;
+  gameState     = 'questionnaire';
+  askCurrentQuestion();
+}
+
+function askCurrentQuestion() {
+  const q = charQuestions[charQIdx];
+  addMsg('msg-system', q.prompt);
+  // Choice questions also render quick-pick buttons; typing still works.
+  if (q.type === 'choice' && Array.isArray(q.options) && q.options.length) {
+    const box = document.createElement('div');
+    box.className = 'msg msg-system choice-box';
+    box.style.display = 'flex';
+    box.style.flexWrap = 'wrap';
+    box.style.gap = '6px';
+    q.options.forEach(opt => {
+      const b = document.createElement('button');
+      b.className = 'choice-btn';
+      b.textContent = opt;
+      b.onclick = () => { if (gameState === 'questionnaire') answerCurrentQuestion(opt); };
+      box.appendChild(b);
+    });
+    log.appendChild(box);
+    log.scrollTop = log.scrollHeight;
+  }
+  inp.placeholder = q.type === 'choice'
+    ? 'Pick an option above or type your own...'
+    : 'Type your answer...';
+  inp.focus();
+}
+
+function answerCurrentQuestion(answer) {
+  const q = charQuestions[charQIdx];
+  charAnswers[q.field] = answer;
+  addMsg('msg-player', answer);
+  charQIdx++;
+  if (charQIdx < charQuestions.length) {
+    askCurrentQuestion();
+  } else {
+    finishQuestionnaire();
+  }
+}
+
+async function finishQuestionnaire() {
+  setInputEnabled(false);
+  const thinking = addThinking();
+  try {
+    const r = await fetch('/api/init', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ input: JSON.stringify(charAnswers) })
+    });
+    const data = await r.json();
+    thinking.remove();
+    if (!data.success) {
+      addMsg('msg-error', 'Init error: ' + (data.error || '?'));
+      setInputEnabled(true);
+      return;
+    }
+    if (data.arrival) {
+      addMsg('msg-narration', data.arrival);
+    } else {
+      // Arrival scene unavailable (no generate_arrival, or its LLM call failed).
+      // Don't leave a blank screen — tell the player it's their turn.
+      addMsg('msg-system', 'Sei arrivato. Cosa fai?');
+    }
+    hud.textContent = data.display || '';
+    gameState       = 'playing';
+    inp.placeholder = 'What do you do?';
+  } catch (e) {
+    thinking.remove();
+    addMsg('msg-error', 'Network error: ' + e.message);
+  }
+  setInputEnabled(true);
+  inp.focus();
 }
 
 /* ================================================================
@@ -1221,14 +1538,21 @@ btnStart.addEventListener('click', async () => {
 
     addMsg('msg-narration', data.welcome);
     hud.textContent = data.display || '';
-    gameState       = 'awaiting_init';
-    inp.placeholder = 'Reply to the script (empty = use default)...';
     currentSaveKey = data.save_file || null;
     showGameUI(selectedScript, data.save_file || null);
     loadCommands();
     clearPinBox();
     setInputEnabled(true);
-    inp.focus();
+
+    // Scripted questionnaire if the script defines get_character_questions(),
+    // otherwise the classic single-input (name) init.
+    if (Array.isArray(data.questions) && data.questions.length) {
+      startQuestionnaire(data.questions);
+    } else {
+      gameState       = 'awaiting_init';
+      inp.placeholder = 'Reply to the script (empty = use default)...';
+      inp.focus();
+    }
 
   } catch (e) {
     addMsg('msg-error', 'Network error: ' + e.message);
@@ -1422,6 +1746,12 @@ async function sendInput() {
   }
   histIdx = -1;
 
+  /* ---------- QUESTIONNAIRE ---------- */
+  if (gameState === 'questionnaire') {
+    if (text) answerCurrentQuestion(text);
+    return;
+  }
+
   /* ---------- AWAITING_INIT ---------- */
   if (gameState === 'awaiting_init') {
     if (text) addMsg('msg-player', text);
@@ -1440,6 +1770,7 @@ async function sendInput() {
         setInputEnabled(true);
         return;
       }
+      if (data.arrival) addMsg('msg-narration', data.arrival);
       hud.textContent = data.display || '';
       gameState       = 'playing';
       inp.placeholder = 'What do you do?';
@@ -1480,13 +1811,13 @@ async function sendInput() {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ partial, lora, mode, instruction })
     };
-  } else if (text.startsWith('/swap')) {
-    endpoint  = '/api/swap';
-    fetchOpts = {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ input: text })
-    };
+  // } else if (text.startsWith('/swap')) {  // disabled — requires faceswap_locale server
+  //   endpoint  = '/api/swap';
+  //   fetchOpts = {
+  //     method:  'POST',
+  //     headers: { 'Content-Type': 'application/json' },
+  //     body:    JSON.stringify({ input: text })
+  //   };
   } else if (text.startsWith('/generate_asset')) {
     const id = text.split(' ').slice(1).join(' ').trim();
     endpoint  = '/api/generate_asset';
@@ -1557,7 +1888,6 @@ async function sendInput() {
         const ph  = addMsg('msg-system thinking', 'Generating image...');
         const cap = text.startsWith('/generate_asset')
           ? 'Asset: ' + text.split(' ').slice(1).join(' ')
-          : text.startsWith('/swap') ? 'Face swap'
           : 'Scene';
         await handleImageResponse(data, ph, cap);
       } else {
@@ -1961,6 +2291,17 @@ async function loadSettings() {
     sv('s-g-model',          d.gemini_model);
     sv('s-g-key',            d.gemini_key);
 
+    sv('s-gen-model',        d.gen_model);
+    sv('s-gen-provider',     d.gen_provider);
+    sv('s-agent-model',      d.agent_model);
+    sv('s-agent-provider',   d.agent_provider);
+    sv('s-ambient-model',    d.ambient_model);
+    sv('s-ambient-provider', d.ambient_provider);
+    sv('s-coder-model',      d.coder_model);
+    sv('s-coder-provider',   d.coder_provider);
+    const cml = document.getElementById('coder-model-label');
+    if (cml) cml.textContent = (d.coder_provider || '?') + ' · ' + (d.coder_model || '?');
+
     const imgPv = d.img_enabled ? (d.img_provider || '') : '';
     sv('s-img-provider',     imgPv);
     sv('s-img-url',          d.img_url);
@@ -2068,6 +2409,14 @@ async function saveSettings() {
     claude_key:       gv('s-claude-key'),
     gemini_model:     gv('s-g-model'),
     gemini_key:       gv('s-g-key'),
+    gen_model:        gv('s-gen-model'),
+    gen_provider:     gv('s-gen-provider'),
+    agent_model:      gv('s-agent-model'),
+    agent_provider:   gv('s-agent-provider'),
+    ambient_model:    gv('s-ambient-model'),
+    ambient_provider: gv('s-ambient-provider'),
+    coder_model:      gv('s-coder-model'),
+    coder_provider:   gv('s-coder-provider'),
     img_enabled:      imgProv !== '',
     img_provider:     imgProv,
     img_url:          gv('s-img-url'),
@@ -2117,6 +2466,8 @@ async function saveSettings() {
     const d = await r.json();
     if (d.success) {
       ttsNarratorVoice = payload.tts_narrator_voice || '';
+      const cml = document.getElementById('coder-model-label');
+      if (cml) cml.textContent = (payload.coder_provider || 'main') + ' · ' + (payload.coder_model || 'main model');
       closeSettings(); addMsg('msg-system', '⚙ Settings saved.');
     }
     else addMsg('msg-error', 'Settings error: ' + (d.error || 'unknown'));
@@ -2267,6 +2618,440 @@ function onTtsEnvChange() {
   row.style.display = t && t !== 'system' ? '' : 'none';
   if (lbl) lbl.textContent = t === 'conda' ? 'Env name' : 'Path';
 }
+
+// ==========================================================================
+// CODERAI
+// ==========================================================================
+
+function switchMainTab(tab) {
+  const isGame = tab === 'game';
+  document.getElementById('game-panel').style.display  = isGame ? 'flex' : 'none';
+  document.getElementById('coder-panel').classList.toggle('visible', !isGame);
+  document.getElementById('mtab-game').classList.toggle('active',  isGame);
+  document.getElementById('mtab-coder').classList.toggle('active', !isGame);
+  if (!isGame) fetchCoderStatus();
+}
+
+async function fetchCoderStatus() {
+  try {
+    const r = await fetch('/api/coder/status');
+    if (!r.ok) return;
+    const d = await r.json();
+    const dot = document.getElementById('coder-status-dot');
+    dot.textContent = d.provider + ' / ' + d.model +
+                      (d.history_length ? '  [' + d.history_length + ' msgs]' : '');
+  } catch(e) {}
+}
+
+// Tool icon map
+const TOOL_ICONS = {
+  read_file:'📄', list_files:'📋', write_file:'✏', str_replace:'✏',
+  delete_file:'🗑', copy_file:'📋', find_definition:'🔍', find_usages:'🔍',
+  check_lua_syntax:'✔', run_lua:'▶', eval_lua:'⚡', get_game_state:'🎮',
+  get_script_errors:'⚠', reload_script:'↺', read_knowledge:'📖',
+  update_coder_memory:'🧠', web_search:'🌐', search_images:'🖼',
+  download_asset:'⬇', call_undo:'↩', load_save:'📂'
+};
+
+function appendCoderMsg(role, text, toolsUsed) {
+  const log = document.getElementById('coder-log');
+  const div = document.createElement('div');
+  div.className = 'coder-msg ' + role;
+
+  if (role === 'ai' && text) {
+    div.textContent = text;
+    // Detect local image paths in text and render inline thumbnails
+    const imgPathRe = /(?:my_scripts|scripts|images|saves)\/[^\s"'<>]+\.(?:png|jpg|jpeg|webp)/gi;
+    const foundPaths = [...new Set(text.match(imgPathRe) || [])];
+    if (foundPaths.length) {
+      const grid = document.createElement('div');
+      grid.className = 'coder-img-grid local-imgs';
+      for (const p of foundPaths) {
+        const card = document.createElement('div');
+        card.className = 'coder-img-card';
+        card.title = p;
+        const im = document.createElement('img');
+        im.src = '/api/coder/image?path=' + encodeURIComponent(p) + '&t=' + Date.now();
+        im.loading = 'lazy';
+        im.onerror = function(){ this.parentElement.style.display='none'; };
+        const lbl = document.createElement('div');
+        lbl.className = 'img-lbl';
+        lbl.textContent = p.split('/').pop();
+        card.onclick = () => { navigator.clipboard.writeText(p).catch(()=>{}); };
+        card.appendChild(im); card.appendChild(lbl);
+        grid.appendChild(card);
+      }
+      div.appendChild(grid);
+    }
+    // Render image grids from search_images tool results
+    if (toolsUsed) {
+      for (const t of toolsUsed) {
+        if (t.name === 'search_images' && t.image_results && t.image_results.results) {
+          const grid = document.createElement('div');
+          grid.className = 'coder-img-grid';
+          for (const img of t.image_results.results) {
+            if (!img.thumbnail_url && !img.image_url) continue;
+            const card = document.createElement('div');
+            card.className = 'coder-img-card';
+            card.title = img.title || '';
+            const im = document.createElement('img');
+            const _src = img.thumbnail_url || img.image_url;
+            im.src = _src.startsWith('http') ? '/api/coder/image?url=' + encodeURIComponent(_src) : _src;
+            im.loading = 'lazy';
+            im.onerror = function(){ this.parentElement.style.display='none'; };
+            const lbl = document.createElement('div');
+            lbl.className = 'img-lbl';
+            lbl.textContent = img.title || img.author || '';
+            // Click copies image_url to clipboard / inserts into input
+            card.onclick = () => {
+              const url = img.image_url || img.thumbnail_url;
+              navigator.clipboard.writeText(url).catch(()=>{});
+              document.getElementById('coder-input').value += '\n' + url;
+            };
+            card.appendChild(im); card.appendChild(lbl);
+            grid.appendChild(card);
+          }
+          if (grid.children.length) div.appendChild(grid);
+        }
+      }
+    }
+  } else {
+    div.textContent = text;
+  }
+
+  // Tool badges row
+  if (toolsUsed && toolsUsed.length) {
+    const row = document.createElement('div');
+    row.className = 'coder-tools';
+    for (const t of toolsUsed) {
+      const badge = document.createElement('span');
+      const icon = TOOL_ICONS[t.name] || '🔧';
+      let cls = 'tool-badge';
+      if (t.pending) cls += ' t-pending';
+      badge.className = cls;
+      badge.textContent = icon + ' ' + t.name + (t.brief ? ': ' + t.brief : '');
+      row.appendChild(badge);
+    }
+    div.appendChild(row);
+  }
+
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+// Handle a loop result from /chat, /approve, or /deny
+async function handleCoderResult(d, loadDiv) {
+  if (loadDiv) loadDiv.remove();
+  if (!d.success) { appendCoderMsg('sys', '⚠ ' + (d.error || 'unknown error')); return; }
+  const tools = d.tools_used || [];
+  if (d.status === 'pending_approval') {
+    // Show auto-executed tools as badges before the approval prompt
+    if (tools.length) appendCoderMsg('sys', '', tools.filter(t => !t.pending));
+    appendCoderMsg('sys', (d.is_danger ? '⚠ DANGER' : '⚡ Approval needed') + ': ' + d.tool_name);
+    showCoderApproval(d.tool_name, d.preview, d.is_danger, tools);
+  } else {
+    appendCoderMsg('ai', d.reply, tools);
+    fetchCoderStatus();
+    // If an async image job was started, begin polling
+    if (d.async_job && d.async_job.job_id)
+      startCoderImgPoll(d.async_job.job_id, d.async_job.output_path);
+  }
+}
+
+function startCoderImgPoll(jobId, outputPath) {
+  const log = document.getElementById('coder-log');
+  const notice = appendCoderMsg('sys', '⏳ Elaborazione immagine in corso... (1-10 min)');
+  const iv = setInterval(async () => {
+    try {
+      const r = await fetch('/api/coder/image_job/' + encodeURIComponent(jobId));
+      const d = await r.json();
+      if (d.status === 'done') {
+        clearInterval(iv);
+        notice.remove();
+        // Notify C++ so the next chat turn carries the completion in context
+        fetch('/api/coder/job_done', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({job_id: jobId, output_path: outputPath, status:'done'})
+        }).catch(()=>{});
+        const wrap = document.createElement('div');
+        wrap.className = 'coder-msg ai';
+        wrap.textContent = '✓ Immagine pronta: ' + outputPath;
+        const grid = document.createElement('div');
+        grid.className = 'coder-img-grid local-imgs';
+        const card = document.createElement('div');
+        card.className = 'coder-img-card';
+        const im = document.createElement('img');
+        im.src = '/api/coder/image?path=' + encodeURIComponent(outputPath) + '&t=' + Date.now();
+        im.onerror = () => card.style.display = 'none';
+        const lbl = document.createElement('div');
+        lbl.className = 'img-lbl';
+        lbl.textContent = outputPath.split('/').pop();
+        card.appendChild(im); card.appendChild(lbl);
+        grid.appendChild(card);
+        wrap.appendChild(grid);
+        log.appendChild(wrap);
+        log.scrollTop = log.scrollHeight;
+      } else if (d.status === 'error') {
+        clearInterval(iv);
+        notice.remove();
+        // Notify C++ about the failure too
+        fetch('/api/coder/job_done', {method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({job_id: jobId, output_path: outputPath, status:'error', error: d.error||'unknown'})
+        }).catch(()=>{});
+        appendCoderMsg('sys', '⚠ Errore modifica immagine: ' + (d.error || 'unknown'));
+      }
+      // status === 'running': keep polling
+    } catch(e) { /* network hiccup, keep polling */ }
+  }, 6000);
+}
+
+async function coderSend() {
+  const inputEl = document.getElementById('coder-input');
+  const msg = inputEl.value.trim();
+  if (!msg) return;
+
+  inputEl.disabled = true;
+  document.getElementById('btn-coder-send').disabled = true;
+
+  // Provider/model come from Settings (LLM tab) — no per-message override.
+  const body = { message: msg };
+
+  try {
+    const r = await fetch('/api/coder/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (r.status === 409) {
+      // Approval pending — restore input, flash the approval modal
+      appendCoderMsg('sys', '⚠ Approval pending — approve or deny before sending a new message.');
+      document.getElementById('coder-approval-overlay').style.display = 'flex';
+      return;
+    }
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+    appendCoderMsg('user', msg);
+    const loadDiv = appendCoderMsg('loading', '...');
+    await handleCoderResult(d, loadDiv);
+  } catch(e) {
+    appendCoderMsg('sys', '⚠ Network error: ' + e.message);
+  } finally {
+    inputEl.disabled = false;
+    document.getElementById('btn-coder-send').disabled = false;
+    inputEl.focus();
+  }
+}
+
+function renderDiff(preview, toolName) {
+  // For str_replace: colorize --- REMOVE --- / +++ ADD +++ sections
+  if (toolName !== 'str_replace') {
+    const pre = document.createElement('pre');
+    pre.id = 'coder-approval-preview';
+    pre.textContent = preview || '(no preview)';
+    return pre;
+  }
+  const block = document.createElement('div');
+  block.id = 'coder-approval-preview';
+  block.className = 'diff-block';
+  const remMatch = preview.match(/--- REMOVE ---\n([\s\S]*?)\n\+\+\+ ADD \+\+\+/);
+  const addMatch = preview.match(/\+\+\+ ADD \+\+\+\n([\s\S]*)/);
+  const header   = preview.split('\n--- REMOVE')[0];
+  const span = (cls, txt) => { const s=document.createElement('span'); s.className=cls; s.textContent=txt; return s; };
+  if (header) block.appendChild(span('diff-ctx', header + '\n'));
+  if (remMatch) {
+    block.appendChild(span('diff-ctx', '--- REMOVE ---\n'));
+    for (const l of remMatch[1].split('\n'))
+      block.appendChild(span('diff-rem', '- ' + l + '\n'));
+  }
+  if (addMatch) {
+    block.appendChild(span('diff-ctx', '+++ ADD +++\n'));
+    for (const l of addMatch[1].split('\n'))
+      block.appendChild(span('diff-add', '+ ' + l + '\n'));
+  }
+  if (!remMatch && !addMatch) block.textContent = preview || '(no preview)';
+  return block;
+}
+
+let _pendingToolsUsed = [];
+function showCoderApproval(toolName, preview, isDanger, toolsUsed) {
+  _pendingToolsUsed = toolsUsed || [];
+  document.getElementById('coder-approval-title').textContent =
+    (isDanger ? '⚠ DANGER — ' : '') + toolName;
+  const old = document.getElementById('coder-approval-preview');
+  const newEl = renderDiff(preview, toolName);
+  old.replaceWith(newEl);
+  document.getElementById('coder-approval-overlay').style.display = 'flex';
+}
+
+async function coderApprove() {
+  document.getElementById('coder-approval-overlay').style.display = 'none';
+  // Mark pending badge as approved
+  const approved = _pendingToolsUsed.filter(t => t.pending);
+  for (const t of approved) t.approved = true;
+  const loadDiv = appendCoderMsg('loading', '...', _pendingToolsUsed.length ? _pendingToolsUsed : undefined);
+  _pendingToolsUsed = [];
+  try {
+    const r = await fetch('/api/coder/approve', { method: 'POST' });
+    await handleCoderResult(await r.json(), loadDiv);
+  } catch(e) {
+    if (loadDiv) loadDiv.remove();
+    appendCoderMsg('sys', '⚠ ' + e.message);
+  }
+}
+
+async function coderDeny() {
+  document.getElementById('coder-approval-overlay').style.display = 'none';
+  const denied = _pendingToolsUsed.filter(t => t.pending);
+  for (const t of denied) { t.denied = true; delete t.pending; }
+  appendCoderMsg('sys', '✕ denied', _pendingToolsUsed.length ? _pendingToolsUsed : undefined);
+  _pendingToolsUsed = [];
+  const loadDiv = appendCoderMsg('loading', '...');
+  try {
+    const r = await fetch('/api/coder/deny', { method: 'POST' });
+    await handleCoderResult(await r.json(), loadDiv);
+  } catch(e) {
+    if (loadDiv) loadDiv.remove();
+    appendCoderMsg('sys', '⚠ ' + e.message);
+  }
+}
+
+async function coderReset() {
+  await fetch('/api/coder/reset', { method: 'POST' });
+  document.getElementById('coder-log').innerHTML = '';
+  appendCoderMsg('sys', 'Session reset.');
+  fetchCoderStatus();
+}
+
+// ---- File tree ----
+let _treeExpanded = {};
+
+function toggleCoderTree() {
+  const sb = document.getElementById('coder-sidebar');
+  sb.classList.toggle('hidden');
+  if (!sb.classList.contains('hidden') && !document.getElementById('coder-tree-root').children.length)
+    loadCoderTree('');
+}
+
+async function loadCoderTree(path) {
+  try {
+    const r = await fetch('/api/coder/files?path=' + encodeURIComponent(path));
+    if (!r.ok) return;
+    const d = await r.json();
+    const target = path === ''
+      ? document.getElementById('coder-tree-root')
+      : document.querySelector('[data-tree-path="' + CSS.escape(path) + '"]');
+    if (!target) return;
+    target.innerHTML = '';
+    if (path === '') {
+      // root: render top-level sections
+      for (const item of d.items) renderTreeItem(target, item);
+    } else {
+      const child = document.createElement('div');
+      child.className = 'tree-children';
+      for (const item of d.items) renderTreeItem(child, item);
+      target.appendChild(child);
+    }
+  } catch(e) {}
+}
+
+function renderTreeItem(parent, item) {
+  const row = document.createElement('div');
+  row.className = 'tree-item' + (item.type==='dir' ? ' is-dir' : '') + (item.is_image ? ' is-img' : '');
+  const icon = item.type==='dir' ? '📁' : (item.is_image ? '🖼' : '📄');
+  row.textContent = icon + ' ' + item.name;
+  row.title = item.path;
+
+  if (item.type === 'dir') {
+    const children = document.createElement('div');
+    children.setAttribute('data-tree-path', item.path);
+    let expanded = false;
+    row.onclick = async () => {
+      expanded = !expanded;
+      row.textContent = (expanded ? '📂' : '📁') + ' ' + item.name;
+      if (expanded) { await loadCoderTree(item.path); children.style.display='block'; }
+      else children.style.display = 'none';
+    };
+    parent.appendChild(row);
+    parent.appendChild(children);
+  } else {
+    row.onclick = () => {
+      const ta = document.getElementById('coder-input');
+      const pos = ta.selectionStart;
+      const v = ta.value;
+      ta.value = v.slice(0,pos) + item.path + v.slice(pos);
+      ta.focus();
+      ta.selectionStart = ta.selectionEnd = pos + item.path.length;
+    };
+    parent.appendChild(row);
+    // Image: show thumbnail below row
+    if (item.is_image) {
+      const img = document.createElement('img');
+      img.className = 'tree-img-thumb';
+      img.src = '/api/coder/image?path=' + encodeURIComponent(item.path);
+      img.loading = 'lazy';
+      img.onerror = function(){ this.style.display='none'; };
+      parent.appendChild(img);
+    }
+  }
+}
+
+// Wire up CoderAI controls after DOM ready
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('btn-coder-send').addEventListener('click', coderSend);
+  document.getElementById('btn-coder-reset').addEventListener('click', coderReset);
+  document.getElementById('btn-coder-test').addEventListener('click', async () => {
+    const btn = document.getElementById('btn-coder-test');
+    btn.disabled = true; btn.textContent = '🔬 ...';
+    try {
+      const r = await fetch('/api/coder/capabilities');
+      const d = await r.json();
+      const t = d.tools  ? '✅ tools'  : ('❌ tools'  + (d.tools_error  ? ' ('+d.tools_error.substring(0,60)+')'  : ''));
+      const v = d.vision ? '✅ vision' : ('❌ vision' + (d.vision_error ? ' ('+d.vision_error.substring(0,60)+')' : ''));
+      appendCoderMsg('sys', `[${d.provider}] ${d.model}\n${t}\n${v}`);
+    } catch(e) {
+      appendCoderMsg('sys', '⚠ Test error: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = '🔬 Test';
+    }
+  });
+  document.getElementById('btn-coder-compact').addEventListener('click', () => {
+    const ci = document.getElementById('coder-input');
+    ci.value = 'Salva un riassunto conciso di questa sessione in coder_memory.md usando update_coder_memory. Includi: prompt immagini usati (con path), file modificati, decisioni chiave. Massimo 300 parole.';
+    coderSend();
+  });
+
+  const ci = document.getElementById('coder-input');
+  ci.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); coderSend(); }
+  });
+  ci.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+  });
+
+  // @hint chips: click inserts tag at cursor position in CoderAI input
+  document.querySelectorAll('#coder-at-hints span').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const tag = chip.textContent.trim();
+      const start = ci.selectionStart, end = ci.selectionEnd;
+      const v = ci.value;
+      ci.value = v.slice(0, start) + tag + v.slice(end);
+      ci.selectionStart = ci.selectionEnd = start + tag.length;
+      ci.focus();
+      ci.dispatchEvent(new Event('input'));
+    });
+  });
+
+  // Start with sidebar hidden; opens on 📁 click
+  document.getElementById('coder-sidebar').classList.add('hidden');
+});
+
+// ==========================================================================
+// END CODERAI
+// ==========================================================================
 
 async function serverAction(server, action) {
   try {

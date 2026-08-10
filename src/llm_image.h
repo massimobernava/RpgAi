@@ -13,17 +13,34 @@
 //  Or add image_impl.cpp to the project (see bottom of file).
 //
 //  Supported providers:
-//    SDCPP_LOCAL   stable-diffusion.cpp server  (native async)
-//    OPENAI_IMAGE  DALL-E / GPT-image-1         (sync, multipart for edits)
-//    OPENROUTER_IMG openrouter.ai image models  (sync, JSON)
+//    SDCPP_LOCAL    stable-diffusion.cpp server  (t2i sync, i2i async polling)
+//    OPENAI_IMAGE   DALL-E / GPT-image-1         (sync, multipart for edits)
+//    OPENROUTER_IMG openrouter.ai image models   (sync, chat-completions JSON)
+//    FAL_AI         fal.ai serverless            (i2i, Qwen-Image-Edit etc.)
+//    DASHSCOPE      Alibaba DashScope            (t2i + i2i, Qwen-Image native)
+//    AIMLAPI        AI/ML API OpenAI-compatible  (t2i + i2i)
+//    WAVESPEED      wavespeed.ai                 (i2i, async polling, LoRA)
+//    QWEN_LOCAL     local qwen_locale server     (i2i, multipart raw PNG)
+//    T2I_LOCAL      local t2i_locale server      (t2i only)
 //
 //  Exposed operations:
 //    build_collage(entries)                    → PNG bytes
-//    text_to_image(prompt)                     → PNG bytes
-//    image_to_image(collage_bytes, prompt)     → PNG bytes   (async for SDCPP)
-//    save_image(bytes, path)                   → bool
+//    text_to_image(prompt)                     → image bytes (validated)
+//    image_to_image(collage_bytes, prompt)     → image bytes (validated, cached)
+//    save_image(bytes, path)                   → bool (creates parent dirs)
 //    bytes_to_base64(bytes)                    → string
 //    base64_to_bytes(string)                   → bytes
+//
+//  Robustness invariants (do not regress):
+//    - every t2i/i2i result validated: HTTP status checked on all requests
+//      and downloads; bytes must carry an image magic number (PNG/JPEG/GIF/
+//      WEBP/BMP) before being cached or returned
+//    - scene_cache / pin_cache: db access serialized via mutex (image jobs
+//      run on detached threads), db written via temp file + atomic rename
+//    - cache key: length-prefixed fields, sub-second mtime + total asset size
+//    - bypass (regen) generations rewrite the plain base-key entry so the
+//      next normal lookup hits the fresh render, never the stale one
+//    - renders with missing asset files are never cached
 // =============================================================================
 
 #pragma once
@@ -34,6 +51,7 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <mutex>
 #include <chrono>
 #include <cstring>
 #include <algorithm>
@@ -150,6 +168,55 @@ static size_t write_bytes_cb(void* ptr, size_t size, size_t nmemb, std::vector<u
     return size * nmemb;
 }
 
+// Reads the HTTP response code from a live curl handle (0 if unavailable).
+static long http_status(CURL* curl) {
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    return code;
+}
+
+// Throws if the HTTP status indicates an error, including a body excerpt.
+// Error bodies (HTML/JSON) must never be mistaken for image bytes downstream.
+static void throw_on_http_error(long code, const std::string& ctx,
+                                 const std::string& body) {
+    if (code < 400) return;
+    throw std::runtime_error("[IMG] " + ctx + ": HTTP " + std::to_string(code)
+                             + ". Body: " + body.substr(0, 300));
+}
+
+static void throw_on_http_error(long code, const std::string& ctx,
+                                 const std::vector<uint8_t>& body) {
+    if (code < 400) return;
+    std::string excerpt(body.begin(),
+                        body.begin() + std::min<size_t>(body.size(), 300));
+    throw std::runtime_error("[IMG] " + ctx + ": HTTP " + std::to_string(code)
+                             + ". Body: " + excerpt);
+}
+
+// True if the bytes start with a known image magic number.
+static bool looks_like_image(const std::vector<uint8_t>& b) {
+    if (b.size() < 12) return false;
+    if (b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return true;   // PNG
+    if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return true;                // JPEG
+    if (b[0] == 'G' && b[1] == 'I' && b[2] == 'F' && b[3] == '8') return true;    // GIF
+    if (b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' &&
+        b[8] == 'W' && b[9] == 'E' && b[10] == 'B' && b[11] == 'P') return true;  // WEBP
+    if (b[0] == 'B' && b[1] == 'M') return true;                                  // BMP
+    return false;
+}
+
+// File extension matching the actual byte content (default ".jpg").
+static std::string sniff_image_ext(const std::vector<uint8_t>& b) {
+    if (b.size() >= 12) {
+        if (b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return ".png";
+        if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return ".jpg";
+        if (b[0] == 'G' && b[1] == 'I' && b[2] == 'F' && b[3] == '8') return ".gif";
+        if (b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' &&
+            b[8] == 'W' && b[9] == 'E' && b[10] == 'B' && b[11] == 'P') return ".webp";
+    }
+    return ".jpg";
+}
+
 // Performs an HTTP POST with JSON body, returns response body
 static std::string http_post_json(const std::string& url,
                                    const std::string& body,
@@ -171,11 +238,13 @@ static std::string http_post_json(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,        60L);
 
     CURLcode rc = curl_easy_perform(curl);
+    long code = http_status(curl);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
     if (rc != CURLE_OK)
         throw std::runtime_error(std::string("[IMG] curl error: ") + curl_easy_strerror(rc));
+    throw_on_http_error(code, "POST " + url, response);
     return response;
 }
 
@@ -197,11 +266,13 @@ static std::string http_get(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,       30L);
 
     CURLcode rc = curl_easy_perform(curl);
+    long code = http_status(curl);
     if (headers) curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
     if (rc != CURLE_OK)
         throw std::runtime_error(std::string("[IMG] curl GET error: ") + curl_easy_strerror(rc));
+    throw_on_http_error(code, "GET " + url, response);
     return response;
 }
 
@@ -260,12 +331,14 @@ static std::string http_post_multipart(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,       120L);
 
     CURLcode rc = curl_easy_perform(curl);
+    long code = http_status(curl);
     curl_slist_free_all(headers);
     curl_mime_free(form);
     curl_easy_cleanup(curl);
 
     if (rc != CURLE_OK)
         throw std::runtime_error(std::string("[IMG] multipart error: ") + curl_easy_strerror(rc));
+    throw_on_http_error(code, "POST " + url, response);
     return response;
 }
 
@@ -329,14 +402,16 @@ static std::vector<uint8_t> http_post_multipart_raw(
     curl_easy_setopt(curl, CURLOPT_MIMEPOST,      form);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_bytes_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &result);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       300L);  // 300s: torch.compile warm-up can be slow
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       600L);  // 600s: heavy models (Qwen-Image-Edit) need up to 10 min
 
     CURLcode rc = curl_easy_perform(curl);
+    long code = http_status(curl);
     curl_mime_free(form);
     curl_easy_cleanup(curl);
 
     if (rc != CURLE_OK)
         throw std::runtime_error(std::string("[IMG] qwen_local multipart error: ") + curl_easy_strerror(rc));
+    throw_on_http_error(code, "POST " + url, result);
     return result;
 }
 
@@ -394,11 +469,13 @@ static std::vector<uint8_t> http_post_faceswap_raw(
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,       120L);
 
     CURLcode rc = curl_easy_perform(curl);
+    long code = http_status(curl);
     curl_mime_free(form);
     curl_easy_cleanup(curl);
 
     if (rc != CURLE_OK)
         throw std::runtime_error(std::string("[IMG] faceswap error: ") + curl_easy_strerror(rc));
+    throw_on_http_error(code, "POST " + url, result);
     return result;
 }
 
@@ -469,6 +546,9 @@ inline std::vector<uint8_t> base64_to_bytes(const std::string& in) {
 // =============================================================================
 
 inline bool save_image(const std::vector<uint8_t>& bytes, const std::string& path) {
+    std::error_code ec;
+    auto parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
     std::ofstream f(path, std::ios::binary);
     if (!f.is_open()) return false;
     f.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
@@ -480,6 +560,11 @@ inline bool save_image(const std::vector<uint8_t>& bytes, const std::string& pat
 // =============================================================================
 
 namespace scene_cache {
+
+// Serializes all db read-modify-write cycles. Image jobs run on detached
+// threads (web mode) — without this, concurrent /api/image calls race on
+// cache_db.json: lost updates or torn writes that wipe the whole db.
+inline std::mutex db_mutex;
 
 // ---------------------------------------------------------------------------
 // Lightweight hash — 64-bit integer-only implementation (no OpenSSL).
@@ -501,20 +586,18 @@ inline std::string hash_key(const std::string& data) {
 }
 
 // ---------------------------------------------------------------------------
-// Returns the most recent modification timestamp among asset files.
-// Returns 0 if a file does not exist.
+// Returns the most recent modification timestamp among asset files, at the
+// filesystem's native precision (sub-second where supported) — second-level
+// truncation would miss an asset regenerated within the same second.
+// Files that do not exist are skipped; returns 0 only if none exist.
 // ---------------------------------------------------------------------------
-inline std::time_t max_mtime(const std::vector<CollageEntry>& entries) {
-    std::time_t latest = 0;
+inline long long max_mtime(const std::vector<CollageEntry>& entries) {
+    long long latest = 0;
     for (const auto& e : entries) {
         std::error_code ec;
         auto ftime = std::filesystem::last_write_time(e.path, ec);
         if (ec) continue;
-        // Convert to time_t — C++17 compatible
-        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-            ftime - std::filesystem::file_time_type::clock::now()
-            + std::chrono::system_clock::now());
-        std::time_t t = std::chrono::system_clock::to_time_t(sctp);
+        long long t = static_cast<long long>(ftime.time_since_epoch().count());
         if (t > latest) latest = t;
     }
     return latest;
@@ -522,20 +605,32 @@ inline std::time_t max_mtime(const std::vector<CollageEntry>& entries) {
 
 // ---------------------------------------------------------------------------
 // Computes the cache key:
-//   hash( script_name + "|" + sorted_asset_ids + "|" + max_mtime )
+//   hash( script_name + "|" + sorted_asset_ids + "|" + max_mtime + total_size )
+// Total file size catches asset replacements that preserve mtime
+// (cp -p, rsync -a, archive extraction).
 // ---------------------------------------------------------------------------
 inline std::string make_cache_key(const std::string& script,
                                    const std::vector<CollageEntry>& entries,
-                                   std::time_t mtime) {
+                                   long long mtime) {
     // Sort asset ids for determinism
     std::vector<std::string> ids;
     for (const auto& e : entries) ids.push_back(e.tag);
     std::sort(ids.begin(), ids.end());
 
+    unsigned long long total_size = 0;
+    for (const auto& e : entries) {
+        std::error_code ec;
+        auto sz = std::filesystem::file_size(e.path, ec);
+        if (!ec) total_size += sz;
+    }
+
+    // Length-prefix each field so separator characters inside script names
+    // or asset ids cannot produce colliding pre-hash strings
+    // (e.g. ids ["a,b"] vs ["a","b"]).
     std::ostringstream ss;
-    ss << script << "|";
-    for (const auto& id : ids) ss << id << ",";
-    ss << "|" << mtime;
+    ss << script.size() << ':' << script << '|';
+    for (const auto& id : ids) ss << id.size() << ':' << id << ',';
+    ss << '|' << mtime << '|' << total_size;
 
     return hash_key(ss.str());
 }
@@ -648,6 +743,18 @@ inline std::string db_path(const std::string& base_path) {
 inline void ensure_dirs(const std::string& base_path) {
     std::filesystem::create_directories(scene_dir(base_path));
     std::filesystem::create_directories(collage_dir(base_path));
+
+    // Prune temp collages older than 7 days — they are only kept for debugging
+    // and are never referenced by cache lookups.
+    auto cutoff = std::filesystem::file_time_type::clock::now()
+                - std::chrono::hours(24 * 7);
+    std::error_code ec;
+    for (const auto& de : std::filesystem::directory_iterator(collage_dir(base_path), ec)) {
+        std::error_code fec;
+        if (!de.is_regular_file(fec) || fec) continue;
+        auto t = std::filesystem::last_write_time(de.path(), fec);
+        if (!fec && t < cutoff) std::filesystem::remove(de.path(), fec);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -669,10 +776,22 @@ inline json load_db(const std::string& base_path) {
 
 // ---------------------------------------------------------------------------
 // Writes the JSON database to disk.
+// Write-to-temp + rename: the db file is never left half-written, even if
+// the process dies mid-write (rename is atomic on POSIX).
 // ---------------------------------------------------------------------------
 inline void save_db(const std::string& base_path, const json& db) {
-    std::ofstream f(db_path(base_path));
-    if (f.is_open()) f << db.dump(2);
+    std::string final_path = db_path(base_path);
+    std::string tmp_path   = final_path + ".tmp";
+    {
+        std::ofstream f(tmp_path);
+        if (!f.is_open()) return;
+        f << db.dump(2);
+        if (!f.good()) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp_path, final_path, ec);
+    if (ec)
+        std::cerr << "[IMG] cache db rename failed: " << ec.message() << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +802,7 @@ inline void save_db(const std::string& base_path, const json& db) {
 inline std::string lookup(const std::string& base_path,
                            const std::string& cache_key,
                            const std::string& session_start = "") {
+    std::lock_guard<std::mutex> lk(db_mutex);
     json db = load_db(base_path);
     long long start_sec = ts_to_utc_seconds(session_start);
     constexpr long long TOL = 3600;
@@ -715,6 +835,7 @@ inline std::string lookup_last(const std::string& base_path,
                                 const std::string& script,
                                 const std::vector<CollageEntry>& entries,
                                 const std::string& session_start = "") {
+    std::lock_guard<std::mutex> lk(db_mutex);
     json db = load_db(base_path);
     if (db.empty()) return "";
 
@@ -757,15 +878,23 @@ inline std::string lookup_last(const std::string& base_path,
 
 // ---------------------------------------------------------------------------
 // Inserts or updates an entry in the database.
+// also_remove_key: optional second key to evict — used by bypass_cache
+// generations (key = base_key + "_" + ts) to invalidate the plain base_key
+// entry, otherwise the next non-bypass lookup would return the stale
+// pre-regen image.
 // ---------------------------------------------------------------------------
-inline void upsert(const std::string& base_path, const CacheEntry& ce) {
+inline void upsert(const std::string& base_path, const CacheEntry& ce,
+                   const std::string& also_remove_key = "") {
+    std::lock_guard<std::mutex> lk(db_mutex);
     json db = load_db(base_path);
 
-    // Remove any existing entries with the same key
+    // Remove any existing entries with the same key (or the stale base key)
     json new_db = json::array();
     for (const auto& entry : db) {
-        if (entry.value("cache_key", "") != ce.cache_key)
-            new_db.push_back(entry);
+        std::string k = entry.value("cache_key", "");
+        if (k == ce.cache_key) continue;
+        if (!also_remove_key.empty() && k == also_remove_key) continue;
+        new_db.push_back(entry);
     }
 
     json item;
@@ -779,6 +908,12 @@ inline void upsert(const std::string& base_path, const CacheEntry& ce) {
     item["utc_at"]        = ce.utc_at;
     item["session_start"] = ce.session_start;
     new_db.push_back(item);
+
+    // Cap db size — bypass entries have unique keys and would grow unbounded.
+    // Oldest entries dropped first (image files stay on disk as history).
+    constexpr size_t MAX_ENTRIES = 500;
+    while (new_db.size() > MAX_ENTRIES)
+        new_db.erase(new_db.begin());
 
     save_db(base_path, new_db);
 }
@@ -800,8 +935,9 @@ inline std::string save_collage(const std::string& base_path,
 inline std::string save_result(const std::string& base_path,
                                  const std::vector<uint8_t>& bytes,
                                  const std::string& ts) {
-    // Use .jpg because WaveSpeed returns jpeg
-    std::string path = scene_dir(base_path) + ts + "_scene.jpg";
+    // Extension from actual content — WaveSpeed returns jpeg, most others png
+    std::string path = scene_dir(base_path) + ts + "_scene"
+                     + img_detail::sniff_image_ext(bytes);
     save_image(bytes, path);
     return path;
 }
@@ -817,6 +953,10 @@ inline std::string save_result(const std::string& base_path,
 // =============================================================================
 namespace pin_cache {
 
+// Same concurrency concern as scene_cache::db_mutex — pins.json is
+// read-modify-written from detached image-job threads and web routes.
+inline std::mutex pin_mutex;
+
 inline std::string pin_dir(const std::string& base) { return base + "images/pinned/"; }
 inline std::string idx_path(const std::string& base) { return pin_dir(base) + "pins.json"; }
 
@@ -829,12 +969,23 @@ inline json load_index(const std::string& base) {
 
 inline void save_index(const std::string& base, const json& data) {
     std::filesystem::create_directories(pin_dir(base));
-    std::ofstream f(idx_path(base));
-    f << data.dump(2);
+    std::string final_path = idx_path(base);
+    std::string tmp_path   = final_path + ".tmp";
+    {
+        std::ofstream f(tmp_path);
+        if (!f.is_open()) return;
+        f << data.dump(2);
+        if (!f.good()) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp_path, final_path, ec);
+    if (ec)
+        std::cerr << "[IMG] pin index rename failed: " << ec.message() << "\n";
 }
 
 // Returns absolute path of pinned image for key, empty string if not found.
 inline std::string lookup(const std::string& base, const std::string& key) {
+    std::lock_guard<std::mutex> lk(pin_mutex);
     auto idx = load_index(base);
     if (!idx.contains(key)) return "";
     std::string file = idx[key].value("file", "");
@@ -846,6 +997,7 @@ inline std::string lookup(const std::string& base, const std::string& key) {
 // Saves bytes as new pin file, updates index. Returns absolute path.
 inline std::string upsert(const std::string& base, const std::string& key,
                            const std::vector<uint8_t>& bytes, const json& meta) {
+    std::lock_guard<std::mutex> lk(pin_mutex);
     std::filesystem::create_directories(pin_dir(base));
     auto now = std::chrono::system_clock::now();
     auto t   = std::chrono::system_clock::to_time_t(now);
@@ -870,6 +1022,7 @@ inline std::string upsert(const std::string& base, const std::string& key,
 
 // Removes key from index (file kept on disk as history). Returns true if key existed.
 inline bool remove(const std::string& base, const std::string& key) {
+    std::lock_guard<std::mutex> lk(pin_mutex);
     auto idx = load_index(base);
     if (!idx.contains(key)) return false;
     idx.erase(key);
@@ -922,12 +1075,17 @@ inline std::vector<uint8_t> build_collage(const std::vector<CollageEntry>& entri
         if (new_w < 1) new_w = 1;
 
         std::vector<uint8_t> resized(new_w * collage_h * 3);
-        stbir_resize_uint8_linear(
+        void* resize_ok = stbir_resize_uint8_linear(
             raw,     orig_w, orig_h, 0,
             resized.data(), new_w, collage_h, 0,
             STBIR_RGB);
 
         stbi_image_free(raw);
+
+        if (!resize_ok) {
+            std::cerr << "[IMG] Resize failed, skipping: " << entry.path << "\n";
+            continue;
+        }
 
         total_w += new_w + gap_px;
         loaded.push_back({ std::move(resized), new_w, collage_h, entry.tag });
@@ -1043,8 +1201,15 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
     while (std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(img_cfg.poll_interval_ms));
 
-        std::string poll_resp = img_detail::http_get(poll_url);
-        auto jpoll = json::parse(poll_resp);
+        // Transient poll failures (network hiccup, 502, non-JSON body) must not
+        // abort the job — keep polling until the deadline.
+        json jpoll;
+        try {
+            jpoll = json::parse(img_detail::http_get(poll_url));
+        } catch (const std::exception& ex) {
+            std::cerr << "[IMG] sdcpp poll error (retrying): " << ex.what() << "\n";
+            continue;
+        }
 
         std::string status = jpoll.value("status", "unknown");
         std::cerr << "[IMG] job " << job_id << " status: " << status << "\n";
@@ -1313,10 +1478,12 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,        60L);
     CURLcode rc = curl_easy_perform(curl);
+    long code = img_detail::http_status(curl);
     curl_easy_cleanup(curl);
     if (rc != CURLE_OK)
         throw std::runtime_error(std::string("[IMG] fal.ai download error: ")
                                  + curl_easy_strerror(rc));
+    img_detail::throw_on_http_error(code, "fal.ai download", result);
     return result;
 }
 
@@ -1370,16 +1537,19 @@ static std::vector<uint8_t> extract_dashscope_image(const std::string& resp) {
             // HTTP URL — download
             std::vector<uint8_t> result;
             CURL* curl = make_curl();
+            if (!curl) throw std::runtime_error("[IMG] DashScope: curl_easy_init failed");
             curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  img_detail::write_bytes_cb);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &result);
             curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
             curl_easy_setopt(curl, CURLOPT_TIMEOUT,        60L);
             CURLcode rc = curl_easy_perform(curl);
+            long code = img_detail::http_status(curl);
             curl_easy_cleanup(curl);
             if (rc != CURLE_OK)
                 throw std::runtime_error("[IMG] DashScope download error: "
                                          + std::string(curl_easy_strerror(rc)));
+            img_detail::throw_on_http_error(code, "DashScope download", result);
             return result;
         }
     }
@@ -1450,6 +1620,31 @@ static std::string auth_header() {
     return "Authorization: Bearer " + key;
 }
 
+// Resolves a result "url" field: data URL → decode, HTTP URL → download.
+static std::vector<uint8_t> fetch_result(const std::string& url) {
+    if (url.rfind("data:", 0) == 0) {
+        auto comma = url.find(',');
+        if (comma == std::string::npos)
+            throw std::runtime_error("[IMG] aimlapi: malformed data URL");
+        return base64_to_bytes(url.substr(comma + 1));
+    }
+    std::vector<uint8_t> result;
+    CURL* curl = make_curl();
+    if (!curl) throw std::runtime_error("[IMG] aimlapi: curl_easy_init failed");
+    curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  img_detail::write_bytes_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &result);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,        60L);
+    CURLcode rc = curl_easy_perform(curl);
+    long code = img_detail::http_status(curl);
+    curl_easy_cleanup(curl);
+    if (rc != CURLE_OK)
+        throw std::runtime_error(std::string("[IMG] aimlapi download: ") + curl_easy_strerror(rc));
+    img_detail::throw_on_http_error(code, "aimlapi download", result);
+    return result;
+}
+
 inline std::vector<uint8_t> txt2img(const std::string& prompt) {
     std::string model = img_cfg.t2i_model.empty()
         ? "black-forest-labs/flux-1.1-pro" : img_cfg.t2i_model;
@@ -1466,23 +1661,7 @@ inline std::vector<uint8_t> txt2img(const std::string& prompt) {
         throw std::runtime_error("[IMG] aimlapi txt2img: no data. Body: " + resp.substr(0, 200));
 
     std::string url = j["data"][0]["url"].get<std::string>();
-    // data URL → decode, HTTP URL → download
-    if (url.substr(0, 5) == "data:") {
-        auto comma = url.find(',');
-        return base64_to_bytes(url.substr(comma + 1));
-    }
-    std::vector<uint8_t> result;
-    CURL* curl = make_curl();
-    curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  img_detail::write_bytes_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &result);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,        60L);
-    CURLcode rc = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    if (rc != CURLE_OK)
-        throw std::runtime_error(std::string("[IMG] aimlapi download: ") + curl_easy_strerror(rc));
-    return result;
+    return fetch_result(url);
 }
 
 inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
@@ -1505,22 +1684,7 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
         throw std::runtime_error("[IMG] aimlapi img2img: no data. Body: " + resp.substr(0, 200));
 
     std::string url = j["data"][0]["url"].get<std::string>();
-    if (url.substr(0, 5) == "data:") {
-        auto comma = url.find(',');
-        return base64_to_bytes(url.substr(comma + 1));
-    }
-    std::vector<uint8_t> result;
-    CURL* curl = make_curl();
-    curl_easy_setopt(curl, CURLOPT_URL,            url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  img_detail::write_bytes_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &result);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,        60L);
-    CURLcode rc = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    if (rc != CURLE_OK)
-        throw std::runtime_error(std::string("[IMG] aimlapi download: ") + curl_easy_strerror(rc));
-    return result;
+    return fetch_result(url);
 }
 
 } // namespace aimlapi
@@ -1565,10 +1729,12 @@ static std::vector<uint8_t> download_url(const std::string& url) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,        60L);
     CURLcode rc = curl_easy_perform(curl);
+    long code = img_detail::http_status(curl);
     curl_easy_cleanup(curl);
     if (rc != CURLE_OK)
         throw std::runtime_error(std::string("[IMG] wavespeed download: ")
                                  + curl_easy_strerror(rc));
+    img_detail::throw_on_http_error(code, "wavespeed download", result);
     return result;
 }
 
@@ -1581,8 +1747,15 @@ static std::vector<uint8_t> poll_result(const std::string& prediction_id) {
     for (int i = 0; i < max_attempts; ++i) {
         std::this_thread::sleep_for(std::chrono::seconds(3));
 
-        std::string resp = img_detail::http_get(poll_url, auth_header());
-        auto j = json::parse(resp);
+        // Transient poll failures (network hiccup, 502, non-JSON body) must not
+        // abort the job — keep polling until attempts are exhausted.
+        json j;
+        try {
+            j = json::parse(img_detail::http_get(poll_url, auth_header()));
+        } catch (const std::exception& ex) {
+            std::cerr << "[IMG] WaveSpeed poll error (retrying): " << ex.what() << "\n";
+            continue;
+        }
 
         // Check for errors
         if (j.contains("error") && !j["error"].is_null()) {
@@ -1592,6 +1765,10 @@ static std::vector<uint8_t> poll_result(const std::string& prediction_id) {
             throw std::runtime_error("[IMG] WaveSpeed error: " + msg);
         }
 
+        if (!j.contains("data") || !j["data"].is_object()) {
+            std::cerr << "[IMG] WaveSpeed poll: malformed response (retrying)\n";
+            continue;
+        }
         auto& data = j["data"];
         std::string status = data.value("status", "");
 
@@ -1660,6 +1837,10 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
             json imgs = json::array({bytes_to_base64(collage_bytes)});
             for (size_t i = 0; i < extra_refs.size() && imgs.size() < 3; ++i)
                 imgs.push_back(bytes_to_base64(extra_refs[i]));
+            if (extra_refs.size() + 1 > 3)
+                std::cerr << "[IMG] WaveSpeed: " << (extra_refs.size() + 1 - 3)
+                          << " ref oltre il limite API di 3 — SCARTATI "
+                             "(NPC mancanti nel render)\n";
             req["images"] = imgs;
             std::cerr << "[IMG] WaveSpeed LoRA multi-image: " << imgs.size() << " imgs\n";
         } else {
@@ -1677,6 +1858,10 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
         json imgs = json::array({bytes_to_base64(collage_bytes)});
         for (size_t i = 0; i < extra_refs.size() && imgs.size() < 3; ++i)
             imgs.push_back(bytes_to_base64(extra_refs[i]));
+        if (extra_refs.size() + 1 > 3)
+            std::cerr << "[IMG] WaveSpeed: " << (extra_refs.size() + 1 - 3)
+                      << " ref oltre il limite API di 3 — SCARTATI "
+                         "(NPC mancanti nel render)\n";
         std::cerr << "[IMG] WaveSpeed images count: " << imgs.size() << "\n";
         req["images"] = imgs;
     }
@@ -1755,6 +1940,38 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
     return result;
 }
 
+// Overload with explicit lora params — used by CoderAI edit_image to avoid
+// touching img_cfg globals from a detached thread.
+inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
+                                     const std::string& prompt,
+                                     const std::string& lora_name,
+                                     float lora_scale) {
+    std::string url = img_cfg.i2i_url.empty()
+        ? (img_cfg.url.empty() ? "http://127.0.0.1:8000" : img_cfg.url)
+        : img_cfg.i2i_url;
+    if (url.size() < 5 || url.substr(url.size() - 5) != "/edit")
+        url += "/edit";
+    std::cerr << "[IMG] qwen_local POST " << url
+              << "  lora=" << lora_name
+              << "  steps=" << img_cfg.effective_i2i_steps()
+              << "  gs=" << img_cfg.guidance_scale << "\n";
+    std::vector<uint8_t> result = img_detail::http_post_multipart_raw(
+        url, prompt, collage_bytes,
+        lora_name, lora_scale,
+        img_cfg.effective_i2i_steps(),
+        img_cfg.strength,
+        img_cfg.guidance_scale
+    );
+    if (result.empty())
+        throw std::runtime_error("[IMG] qwen_local: empty response from server.");
+    if (result.size() >= 4
+        && !(result[0] == 0x89 && result[1] == 'P' && result[2] == 'N' && result[3] == 'G')) {
+        std::string body(result.begin(), result.begin() + std::min<size_t>(result.size(), 200));
+        throw std::runtime_error("[IMG] qwen_local: response is not a PNG. Body: " + body);
+    }
+    return result;
+}
+
 } // namespace qwen_local
 
 // =============================================================================
@@ -1809,8 +2026,15 @@ inline std::vector<uint8_t> text_to_image(const std::string& prompt,
         // FAL_AI / QWEN_LOCAL / WAVESPEED have no native t2i — fallback to local sdcpp
         default:                             result = sdcpp::txt2img(prompt);          break;
     }
-    if (!disk_path.empty() && !result.empty())
-        save_image(result, disk_path);
+    if (result.empty())
+        throw std::runtime_error("[IMG] t2i provider returned empty image data");
+    if (!img_detail::looks_like_image(result)) {
+        std::string excerpt(result.begin(),
+                            result.begin() + std::min<size_t>(result.size(), 200));
+        throw std::runtime_error("[IMG] t2i result is not an image. Body: " + excerpt);
+    }
+    if (!disk_path.empty() && !save_image(result, disk_path))
+        std::cerr << "[IMG] WARNING: failed to save image to " << disk_path << "\n";
     return result;
 }
 
@@ -1839,9 +2063,10 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
     // --- Cache lookup ---
     // Skipped when bypass_cache=true (regen / refine modes from /image command).
     std::string cache_key;
+    std::string stale_key;   // plain base key to evict on bypass (see below)
     if (!bypass_cache && !base_path.empty() && !script_name.empty() && !entries.empty()) {
         scene_cache::ensure_dirs(base_path);
-        std::time_t mtime = scene_cache::max_mtime(entries);
+        long long mtime = scene_cache::max_mtime(entries);
         cache_key = scene_cache::make_cache_key(script_name, entries, mtime);
 
         std::string cached = scene_cache::lookup(base_path, cache_key, session_start);
@@ -1856,11 +2081,13 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
         // Compute a unique cache_key (base_key + timestamp) so upsert APPENDS
         // instead of overwriting the existing entry. Previous images are preserved;
         // lookup_last() still finds the most recent by scanning in reverse.
+        // The plain base_key entry must be evicted at upsert time, otherwise the
+        // next non-bypass lookup() would return the stale pre-regen image.
         if (!base_path.empty() && !script_name.empty() && !entries.empty()) {
             scene_cache::ensure_dirs(base_path);
-            std::time_t mtime = scene_cache::max_mtime(entries);
-            std::string base_key = scene_cache::make_cache_key(script_name, entries, mtime);
-            cache_key = base_key + "_" + scene_cache::timestamp_str();
+            long long mtime = scene_cache::max_mtime(entries);
+            stale_key = scene_cache::make_cache_key(script_name, entries, mtime);
+            cache_key = stale_key + "_" + scene_cache::timestamp_str();
         }
         std::cerr << "[IMG] Cache bypassed — generating fresh image (previous preserved)\n";
     }
@@ -1883,6 +2110,10 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
                       << base_image_path << "\n";
         }
     }
+
+    if (i2i_source.empty())
+        throw std::runtime_error("[IMG] i2i source is empty "
+                                 "(collage failed and no usable base image)");
 
     ImageProvider p = img_cfg.i2i_provider_name.empty()
         ? img_cfg.provider
@@ -1954,25 +2185,57 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
         default:                             result = sdcpp::img2img(i2i_source, prompt);            break;
     }
 
+    // --- Validate result ---
+    // Empty bytes or a non-image body (HTML/JSON error page that slipped through)
+    // must never be cached or returned as a "successful" render.
+    if (result.empty())
+        throw std::runtime_error("[IMG] i2i provider returned empty image data");
+    if (!img_detail::looks_like_image(result)) {
+        std::string excerpt(result.begin(),
+                            result.begin() + std::min<size_t>(result.size(), 200));
+        throw std::runtime_error("[IMG] i2i result is not an image. Body: " + excerpt);
+    }
+
     // --- Save result + update database ---
-    if (!base_path.empty() && !cache_key.empty() && !result.empty()) {
-        std::string ts          = scene_cache::timestamp_str();
-        std::string coll_path   = scene_cache::save_collage(base_path, collage_bytes, ts);
-        std::string result_path = scene_cache::save_result(base_path, result, ts);
+    if (!base_path.empty() && !cache_key.empty()) {
+        // Don't cache renders built from an incomplete asset set: build_collage
+        // skips missing files, so the image would be recorded as containing
+        // assets that are not actually in it.
+        bool assets_complete = true;
+        for (const auto& e : entries)
+            if (!std::filesystem::exists(e.path)) { assets_complete = false; break; }
 
-        scene_cache::CacheEntry ce;
-        ce.cache_key     = cache_key;
-        ce.script        = script_name;
-        ce.prompt        = prompt;
-        ce.image_path    = result_path;
-        ce.collage_path  = coll_path;
-        ce.generated_at  = ts;
-        ce.utc_at        = scene_cache::utc_iso_now();
-        ce.session_start = session_start;
-        for (const auto& e : entries) ce.assets.push_back(e.tag);
-        scene_cache::upsert(base_path, ce);
+        if (assets_complete) {
+            std::string ts          = scene_cache::timestamp_str();
+            std::string coll_path   = scene_cache::save_collage(base_path, collage_bytes, ts);
+            std::string result_path = scene_cache::save_result(base_path, result, ts);
 
-        std::cerr << "[IMG] Scene saved: " << result_path << "\n";
+            scene_cache::CacheEntry ce;
+            ce.cache_key     = cache_key;
+            ce.script        = script_name;
+            ce.prompt        = prompt;
+            ce.image_path    = result_path;
+            ce.collage_path  = coll_path;
+            ce.generated_at  = ts;
+            ce.utc_at        = scene_cache::utc_iso_now();
+            ce.session_start = session_start;
+            for (const auto& e : entries) ce.assets.push_back(e.tag);
+            scene_cache::upsert(base_path, ce);
+
+            // Bypass generations also rewrite the plain base-key entry to point
+            // at the fresh image: the next non-bypass lookup() must hit the
+            // regenerated render, not the stale pre-regen one (and not pay for
+            // another generation). The timestamped entry above keeps history
+            // for lookup_last().
+            if (!stale_key.empty()) {
+                ce.cache_key = stale_key;
+                scene_cache::upsert(base_path, ce);
+            }
+
+            std::cerr << "[IMG] Scene saved: " << result_path << "\n";
+        } else {
+            std::cerr << "[IMG] Asset files missing — result NOT cached\n";
+        }
     }
 
     return result;
@@ -1996,6 +2259,9 @@ inline ImageProvider img_provider_from_string(const std::string& s) {
     if (s == "wavespeed")  return ImageProvider::WAVESPEED;
     if (s == "qwen_local") return ImageProvider::QWEN_LOCAL;
     if (s == "t2i_local")  return ImageProvider::T2I_LOCAL;
+    if (!s.empty() && s != "sdcpp_local")
+        std::cerr << "[IMG] WARNING: unknown image provider '" << s
+                  << "' — falling back to sdcpp_local\n";
     return ImageProvider::SDCPP_LOCAL;
 }
 

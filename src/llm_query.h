@@ -1,8 +1,55 @@
+#include <map>
+#include <mutex>
+#include <string>
+
+// Default per-request timeout for LLM calls (seconds). Configurable via
+// --llm-timeout so a stalled provider can't freeze a player's turn for minutes.
+// Image calls override this per-request (they may legitimately take longer).
+inline long g_llm_timeout_s = 120;
+
+// Cap on completion tokens for every text LLM call. Without it a degenerate
+// generation (e.g. an endless run of whitespace/padding from a flaky model)
+// streams to the provider's default max — minutes of latency, chat/log filled
+// with "void", and a large completion-token bill. Configurable via
+// --max-output-tokens. Claude paths already cap at 1024; this brings the
+// OpenAI/OpenRouter paths in line. 0 = no cap (use provider default).
+inline long g_llm_max_tokens = 1024;
+
+// ── Token accounting (dev): per-component token usage ────────────────────────
+// Every OpenAI-compatible response carries a "usage" object; we read it (no extra
+// calls) and accumulate by LABEL so we can see how many tokens each component
+// spends (narrator vs agent vs gen vs ambient). The label is a thread_local the
+// caller sets before invoking (so async/worker-thread calls attribute correctly).
+struct LlmTokenStat { long long prompt = 0, completion = 0, total = 0, calls = 0; };
+inline std::map<std::string, LlmTokenStat> g_llm_token_usage;
+inline std::mutex                          g_llm_token_mutex;
+inline thread_local std::string            g_llm_label = "other";
+
+// Read usage from an LLM response (OpenAI style prompt/completion_tokens, or
+// Anthropic input/output_tokens) and add it to the current label's bucket.
+static void record_llm_usage(const json& resp) {
+    if (!resp.is_object() || !resp.contains("usage") || !resp["usage"].is_object())
+        return;
+    const auto& u = resp["usage"];
+    long long p = u.value("prompt_tokens",     u.value("input_tokens",  0));
+    long long c = u.value("completion_tokens", u.value("output_tokens", 0));
+    long long t = u.value("total_tokens",      p + c);
+    std::lock_guard<std::mutex> lk(g_llm_token_mutex);
+    auto& s = g_llm_token_usage[g_llm_label];
+    s.prompt += p; s.completion += c; s.total += t; s.calls += 1;
+}
+
 // curl_easy_init with CURLOPT_NOSIGNAL — required for safe multithreaded use and
 // to prevent libcurl from touching SIGALRM/SIGPIPE on SIGINT.
 static inline CURL* make_curl() {
     CURL* c = curl_easy_init();
-    if (c) curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+    if (c) {
+        curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+        // Bound every request so a stalled endpoint can never hang a worker
+        // (or a mutex-holding coder loop) forever.
+        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT, g_llm_timeout_s);
+    }
     return c;
 }
 
@@ -24,6 +71,40 @@ static void strip_additional_properties(json& node) {
             for (auto& item : node[key]) strip_additional_properties(item);
         }
     }
+}
+
+// Anthropic (Claude) structured output rejects several advisory JSON-Schema
+// constraints: numeric minimum/maximum, and array minItems/maxItems other than
+// 0/1. They are non-structural validation hints, so stripping them only loosens
+// validation (never breaks parsing). Recurses the whole tree, erasing the keys
+// wherever they appear. Lets scripts keep these constraints for other providers.
+static void strip_unsupported_constraints(json& node) {
+    if (node.is_object()) {
+        for (const char* k : {"minimum", "maximum", "exclusiveMinimum",
+                              "exclusiveMaximum", "multipleOf",
+                              "minItems", "maxItems"}) {
+            node.erase(k);
+        }
+        for (auto& el : node.items()) strip_unsupported_constraints(el.value());
+    } else if (node.is_array()) {
+        for (auto& item : node) strip_unsupported_constraints(item);
+    }
+}
+
+// Parse a JSON-Schema string and adapt it to the target model:
+// Google rejects "additionalProperties"; Anthropic (incl. via OpenRouter, model
+// strings like "anthropic/..." or containing "claude") rejects min/max and
+// minItems/maxItems. Central place so every response_format site stays consistent.
+static json schema_for_model(const std::string& schema_str, const std::string& model) {
+    json s = json::parse(schema_str);
+    if (model.rfind("google/", 0) == 0) strip_additional_properties(s);
+    bool is_anthropic = model.find("claude")    != std::string::npos
+                     || model.find("anthropic") != std::string::npos
+                     || model.find("sonnet")    != std::string::npos
+                     || model.find("opus")      != std::string::npos
+                     || model.find("haiku")     != std::string::npos;
+    if (is_anthropic) strip_unsupported_constraints(s);
+    return s;
 }
 
 std::string ollama_query(const std::string& system,
@@ -61,6 +142,7 @@ std::string ollama_query(const std::string& system,
         request["stream"] = false;
         
         request["options"]["temperature"] = 0.1;
+        if (g_llm_max_tokens > 0) request["options"]["num_predict"] = g_llm_max_tokens;
 
         if (!format.empty()) {
             // Using standard std::exception catch will also handle json::parse_error here
@@ -139,6 +221,8 @@ std::string gemini_query(const std::string& system,
         });
     }
     body["contents"] = contents;
+    if (g_llm_max_tokens > 0)
+        body["generationConfig"]["maxOutputTokens"] = g_llm_max_tokens;
 
     // 3. Structured output (JSON Schema)
     if (!format.empty()) {
@@ -163,7 +247,7 @@ std::string gemini_query(const std::string& system,
     
     // 5. Safely parse the response
     try {
-        auto jRes = json::parse(response);
+        auto jRes = json::parse(response); record_llm_usage(jRes);
         
         // Handle successful response
         if (jRes.contains("candidates") && !jRes["candidates"].empty()) {
@@ -203,6 +287,7 @@ std::string openai_query(const std::string& system,
         messages.push_back({{"role", "user"}, {"content", prompt}});
     }
     body["messages"] = messages;
+    if (g_llm_max_tokens > 0) body["max_tokens"] = g_llm_max_tokens;
 
     if (!format.empty()) {
         try {
@@ -211,7 +296,7 @@ std::string openai_query(const std::string& system,
                 {"json_schema", {
                     {"name", "response"},
                     {"strict", true},
-                    {"schema", json::parse(format)}
+                    {"schema", schema_for_model(format, model)}
                 }}
             };
         } catch (const std::exception& e) {
@@ -247,7 +332,7 @@ std::string openai_query(const std::string& system,
 
     try {
         if (!readBuffer.empty()) {
-            auto jRes = json::parse(readBuffer);
+            auto jRes = json::parse(readBuffer); record_llm_usage(jRes);
             if (jRes.contains("choices") && !jRes["choices"].empty()) {
                 return jRes["choices"][0]["message"]["content"].get<std::string>();
             } else if (jRes.contains("error")) {
@@ -269,7 +354,7 @@ std::string claude_query(const std::string& system,
                          const std::string& model) {
     json body;
     body["model"]      = model;
-    body["max_tokens"] = 1024;
+    body["max_tokens"] = (g_llm_max_tokens > 0 ? g_llm_max_tokens : 1024);
 
     // 1. System prompt — separate field, not inside the messages array
     if (!system.empty()) {
@@ -296,7 +381,7 @@ std::string claude_query(const std::string& system,
         try {
             body["output_format"] = {
                 {"type", "json_schema"},
-                {"schema", json::parse(format)}
+                {"schema", schema_for_model(format, model)}
             };
         } catch (const std::exception& e) {
             std::cerr << "[WARNING] Claude format is not a valid JSON Schema: " << e.what() << "\n";
@@ -337,7 +422,7 @@ std::string claude_query(const std::string& system,
     //    OpenAI: response.choices[0].message.content
     try {
         if (!readBuffer.empty()) {
-            auto jRes = json::parse(readBuffer);
+            auto jRes = json::parse(readBuffer); record_llm_usage(jRes);
             if (jRes.contains("content") && !jRes["content"].empty()) {
                 return jRes["content"][0]["text"].get<std::string>();
             } else if (jRes.contains("error")) {
@@ -372,14 +457,14 @@ std::string openrouter_query(const std::string& system,
     }
     body["messages"] = messages;
     body["safe_prompt"] = false;
+    if (g_llm_max_tokens > 0) body["max_tokens"] = g_llm_max_tokens;
 
     // Structured output — same schema format as OpenAI.
     // Google models via OpenRouter reject "additionalProperties", so strip it.
     if (!format.empty()) {
         try {
-            json schema = json::parse(format);
             bool is_google = (model.rfind("google/", 0) == 0);
-            if (is_google) strip_additional_properties(schema);
+            json schema = schema_for_model(format, model);
             body["response_format"] = {
                 {"type", "json_schema"},
                 {"json_schema", {
@@ -434,7 +519,7 @@ headers = curl_slist_append(headers, "X-Safe-Prompt: false");
     // Response structure is identical to OpenAI
     try {
         if (!readBuffer.empty()) {
-            auto jRes = json::parse(readBuffer);
+            auto jRes = json::parse(readBuffer); record_llm_usage(jRes);
             if (jRes.contains("choices") && !jRes["choices"].empty()) {
                 return jRes["choices"][0]["message"]["content"].get<std::string>();
             } else if (jRes.contains("error")) {
@@ -624,11 +709,11 @@ static std::string openai_tool_loop(
         rb["model"]       = model;
         rb["messages"]    = msgs;
         rb["tool_choice"] = "none";
+        if (g_llm_max_tokens > 0) rb["max_tokens"] = g_llm_max_tokens;
         if (!json_schema.empty()) {
             try {
                 bool is_google = (model.rfind("google/", 0) == 0);
-                json sc = json::parse(json_schema);
-                if (is_google) strip_additional_properties(sc);
+                json sc = schema_for_model(json_schema, model);
                 rb["response_format"] = {{"type","json_schema"},{"json_schema",{
                     {"name","response"},{"strict",!is_google},{"schema",sc}
                 }}};
@@ -654,7 +739,7 @@ static std::string openai_tool_loop(
         curl_easy_cleanup(c2);
         if (rc2 != CURLE_OK) return "";
         try {
-            auto jr = json::parse(buf);
+            auto jr = json::parse(buf); record_llm_usage(jr);
             if (jr.contains("error")) return "";          // API error → signal failure
             if (jr.contains("choices") && !jr["choices"].empty()) {
                 auto& m = jr["choices"][0]["message"];
@@ -685,13 +770,18 @@ static std::string openai_tool_loop(
         return r2.empty() ? "{\"error\":\"rescue failed\"}" : r2;
     };
 
+    // The executor (tool calls into Lua, e.g. agents) may change g_llm_label;
+    // re-pin it each iteration so the loop's own API calls stay attributed here.
+    const std::string loop_label = g_llm_label;
     for (int iter = 0; iter < max_iter; ++iter) {
+        g_llm_label = loop_label;
         bool force_final = (iter == max_iter - 1);
         if (force_final)
             std::cerr << "[TOOL LOOP] last iteration — forcing tool_choice:none\n";
         json body;
         body["model"]    = model;
         body["messages"] = messages;
+        if (g_llm_max_tokens > 0) body["max_tokens"] = g_llm_max_tokens;
         if (!force_final) {
             body["tools"]       = jtools;
             body["tool_choice"] = "auto";
@@ -702,8 +792,7 @@ static std::string openai_tool_loop(
         if (!json_schema.empty()) {
             try {
                 bool is_google = (model.rfind("google/", 0) == 0);
-                json schema = json::parse(json_schema);
-                if (is_google) strip_additional_properties(schema);
+                json schema = schema_for_model(json_schema, model);
                 body["response_format"] = {{"type","json_schema"},{"json_schema",{
                     {"name","response"},{"strict",!is_google},{"schema",schema}
                 }}};
@@ -736,7 +825,7 @@ static std::string openai_tool_loop(
         }
 
         try {
-            auto jRes = json::parse(readBuffer);
+            auto jRes = json::parse(readBuffer); record_llm_usage(jRes);
             if (jRes.contains("error")) {
                 std::cerr << "[TOOL LOOP API ERROR] " << jRes["error"].dump() << "\n";
                 return rescue_call();
@@ -818,13 +907,52 @@ static std::string claude_tool_loop(
     if (!user_prompt.empty())
         messages.push_back({{"role","user"},{"content",user_prompt}});
 
+    // Final-text rescue: one no-tools request to extract narration when the loop
+    // exits without a terminal text response. Returns "" on failure.
+    auto final_text_call = [&](const json& msgs) -> std::string {
+        json body;
+        body["model"]      = model;
+        body["max_tokens"] = (g_llm_max_tokens > 0 ? g_llm_max_tokens : 1024);
+        body["messages"]   = msgs;
+        if (!system.empty()) body["system"] = system;
+        std::string buf;
+        CURL* c = make_curl();
+        if (!c) return "";
+        std::string js = body.dump();
+        struct curl_slist* h = nullptr;
+        h = curl_slist_append(h, "Content-Type: application/json");
+        std::string auth = "x-api-key: " + claude_api_key;
+        h = curl_slist_append(h, auth.c_str());
+        h = curl_slist_append(h, "anthropic-version: 2023-06-01");
+        curl_easy_setopt(c, CURLOPT_URL,           claude_baseUrl.c_str());
+        curl_easy_setopt(c, CURLOPT_POSTFIELDS,    js.c_str());
+        curl_easy_setopt(c, CURLOPT_HTTPHEADER,    h);
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, WriteCallback);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA,     &buf);
+        CURLcode rc = curl_easy_perform(c);
+        curl_slist_free_all(h);
+        curl_easy_cleanup(c);
+        if (rc != CURLE_OK) return "";
+        try {
+            auto jr = json::parse(buf); record_llm_usage(jr);
+            if (jr.contains("error")) return "";
+            for (auto& block : jr["content"])
+                if (block.value("type","") == "text") return block.value("text","");
+        } catch (...) {}
+        return "";
+    };
+
+    // The executor (tool calls into Lua, e.g. agents) may change g_llm_label;
+    // re-pin it each iteration so the loop's own API calls stay attributed here.
+    const std::string loop_label = g_llm_label;
     for (int iter = 0; iter < max_iter; ++iter) {
+        g_llm_label = loop_label;
         bool force_final = (iter == max_iter - 1);
         if (force_final)
             std::cerr << "[CLAUDE TOOL LOOP] last iteration — forcing no-tools response\n";
         json body;
         body["model"]      = model;
-        body["max_tokens"] = 1024;
+        body["max_tokens"] = (g_llm_max_tokens > 0 ? g_llm_max_tokens : 1024);
         body["messages"]   = messages;
         if (!system.empty()) body["system"] = system;
         if (!force_final) body["tools"] = jtools;
@@ -852,7 +980,7 @@ static std::string claude_tool_loop(
         if (rc != CURLE_OK) return "{\"error\":\"curl failed\"}";
 
         try {
-            auto jRes = json::parse(readBuffer);
+            auto jRes = json::parse(readBuffer); record_llm_usage(jRes);
             if (jRes.contains("error")) {
                 std::cerr << "[CLAUDE TOOL ERROR] " << jRes["error"].dump() << "\n";
                 return "{\"error\":\"api error\"}";
@@ -888,6 +1016,10 @@ static std::string claude_tool_loop(
             return "{\"error\":\"parse failed\"}";
         }
     }
-    std::cerr << "[CLAUDE TOOL LOOP] max iterations reached\n";
+    std::cerr << "[CLAUDE TOOL LOOP] max iterations reached — final-text rescue\n";
+    {
+        std::string r = final_text_call(messages);
+        if (!r.empty()) return r;
+    }
     return "{\"error\":\"max tool iterations reached\"}";
 }

@@ -1,45 +1,174 @@
 -- =============================================================================
 --  template.lua  —  RpgAi Adventure Template
 --
---  HOW TO USE THIS FILE:
---    1. Copy to scripts/my_adventure.lua
---    2. Follow the [STEP N] markers top to bottom
---    3. Delete any OPTIONAL block you don't need
---    4. Run:  ./build/rpgai --web --provider ollama --model llama3.2 \
---                           --path scripts/ --script my_adventure.lua
+--  ┌─────────────────────────────────────────────────────────────────────────┐
+--  │  FOR CLAUDE — when asked to create a new adventure:                     │
+--  │  DEFAULT PATH is scripts/template_min.lua (declarative quick.define     │
+--  │  spec, lib/quickstart.lua). Use THIS template only for features         │
+--  │  quickstart does not wire: world.lua procedural locations/objects,      │
+--  │  npc.lua code-driven routines, adventure events files, session-         │
+--  │  isolated personas.                                                     │
+--  │  On this path: READ this entire header, then ASK the questions in       │
+--  │  §DECISIONS before writing any code. No code until you have answers.    │
+--  └─────────────────────────────────────────────────────────────────────────┘
 --
---  INCLUDED FEATURES (all optional except REQUIRED markers):
---    - Locations + travel map
---    - Items / inventory
---    - Time + day cycle
---    - Code-driven NPCs  (lib/npc.lua)
---    - LLM-driven agents (lib/agent.lua) with shared turn counter
---    - Persistent memory across sessions (lib/memory.lua)
---    - Tool calling: dice, skill check, memory read/write, custom tools
---    - Image system (t2i backgrounds + NPC portraits)
---    - Hooks: before_ai_turn, after_ai_turn
---    - Custom /commands
+--  FOR HUMAN AUTHORS:
+--    0. Simple adventure? Start from template_min.lua instead (way less code)
+--    1. Copy this file to my_scripts/my_adventure.lua
+--    2. Answer the §DECISIONS questions to know which blocks to keep
+--    3. Follow [STEP N] markers, delete OPTIONAL blocks you don't need
+--    4. Run: ./build/rpgai --web --path my_scripts/ --script my_adventure.lua
+--           [+ provider flags: --provider openrouter --or-key ... --or-model ...]
+--
 -- =============================================================================
+--  §DECISIONS — answer these before writing a single line of code
+-- =============================================================================
+--
+--  1. GENRE & TONE
+--     What setting? (fantasy / contemporary / sci-fi / horror / adult / other)
+--     Content level? (family / suggestive / explicit)
+--     Language? (it / en / other) — affects system prompt and NPC dialogue
+--     Narrative person? (second person "you" is standard; first person possible)
+--
+--  2. ARCHITECTURE MODE — pick one, shapes everything else
+--     MODE A — Schema only (no tools). Simple. Works with any provider/model.
+--              State changes (location, inventory, HP) live in JSON response fields.
+--              Best for: local models, simple linear stories, quick prototypes.
+--     MODE B — Tools only. Minimal schema (narration only). All state via tools.
+--              Best for: complex NPC interaction, procedural worlds, cloud models.
+--     MODE C — Mix. Tools for complex state (move, NPC react), schema for simple
+--              atomic outcomes (game_over, custom flags). Most flexible.
+--              Recommended default for new adventures with NPCs.
+--
+--  3. FEATURES CHECKLIST — which optional systems to include?
+--     [ ] Time + day cycle         → advance_time tool / giorno_index
+--     [ ] Inventory + money        → cambia_inventario tool / state.inventario
+--     [ ] NPC agents (lib/agent)   → think_as_npc tool / init_agents()
+--     [ ] Persistent memory        → memory.lua / memory_write + memory_read tools
+--     [ ] Notes with scope         → remember tool (player/public/npc scopes)
+--     [ ] Procedural locations     → world.lua / generate_location tool
+--     [ ] Procedural objects       → world.lua / generate_object + object_action tools
+--     [ ] Procedural NPCs          → persona.lua / generate_npc tool
+--     [ ] Plot seeds (trame)       → trame/ dir / assegna_ruolo_trama tool
+--     [ ] Image generation         → get_scene_images / get_asset_prompt
+--     [ ] Code-driven NPCs (npc.lua) → routines, needs, events
+--     [ ] Debug commands           → /debug_log, /set_field etc.
+--     [ ] Custom /commands         → process_player_input stubs
+--
+--  4. NPCS
+--     How many pre-defined NPCs? (list names, roles, personalities)
+--     Are they pre-defined in code (static) or generated on-demand (persona.lua)?
+--     Which NPCs get an LLM agent? (all recommended; at minimum: key characters)
+--     Max agent LLM calls per turn? (default 3; increase for many active NPCs)
+--
+--  5. WORLD
+--     List all locations upfront (static) or expand procedurally (world.lua)?
+--     Travel map: free movement or restricted?
+--     Starting location?
+--
+--  6. PROVIDER
+--     Local (ollama) or cloud (openrouter/claude/openai)?
+--     Note: MODE B/C tools require a provider with tool-calling support.
+--     Local models (ollama) work best with MODE A or simple MODE C schemas.
+--
+--  7. PRIVATE SCRIPT?
+--     If yes → place in my_scripts/, not scripts/
+--     Never reference private script names in commits, README, or public output.
+--
+-- =============================================================================
+--  AVAILABLE FEATURES (all optional except REQUIRED)
+-- =============================================================================
+--    REQUIRED:  json, get_welcome_message, set_initial_state,
+--               get_status_for_ai, get_system_prompt, get_json_schema,
+--               process_ai_response, process_player_input, get_display_state,
+--               get_state_snapshot, restore_state
+--
+--    MODE B/C:  get_tools() with: think_as_npc, move_player, move_npc,
+--               advance_time, set_activity, cambia_inventario, remember,
+--               generate_npc, generate_location, generate_object, object_action,
+--               npc_life_event, memory_write, memory_read
+--
+--    HOOKS:     before_ai_turn (reset _tool_calls + agents each turn)
+--               after_ai_turn  (side effects after LLM response)
+--
+--    LIBS:      lib/agent.lua   — LLM-driven NPC agents
+--               lib/memory.lua  — cross-session persistent NPC facts
+--               lib/npc.lua     — code-driven NPC routines/needs
+--               lib/world.lua   — procedural location/object generation
+--               lib/persona.lua — file-backed procedural NPC generation
+--               lib/tools.lua   — tools.build() + roll_dice, skill_check
+--               lib/json_repair — safe_json_decode() global
+--
+-- =============================================================================
+
+-- ── RECOMMENDED: use adventure.lua framework to eliminate boilerplate ────────
+-- local adv       = require("lib/adventure")  -- shared tools, HUD, save/restore
+-- adv.set_config(CFG)                         -- set feature flags (see §DECISIONS)
+--
+-- With adventure.lua, your script only needs:
+--   - LOCATIONS, TRAVEL_MAP, MAIN_NPCS config tables
+--   - get_welcome_message, set_initial_state, get_json_schema
+--   - process_ai_response (adventure-specific state only)
+--   - get_system_prompt (header + rules; common blocks via adv.prompt_*)
+--   - Adventure-specific tools (pass as `extra` to adv.get_tools())
+--   - get_tools(), before_ai_turn(), get_display_state(), get_state_snapshot(),
+--     restore_state() all become 1-3 line wrappers.
+-- See pharma_ceo.lua for a complete example.
+-- ─────────────────────────────────────────────────────────────────────────────
+--
+-- ── NPC SYSTEM — two tiers ───────────────────────────────────────────────────
+-- MAIN NPCs (hand-crafted, evolve over time):
+--   1. Define MAIN_NPCS config table (name, age, relationship, personality,
+--      agent_system, short/long_term_goals). Other fields optional.
+--   2. persona.register_static(id, cfg) in set_initial_state → writes
+--      npcs/<adventure>/<id>.lua if missing; loads from disk if exists.
+--   3. persona.reload_all() → authoritative source is the .lua file on disk.
+--   4. rebuild_npc_data() → NPC_DATA for adv.prompt_npc_* built from persona.
+--   5. npc_life_event tool and dream_tick apply to main NPCs same as generated.
+--
+-- GENERATED NPCs (LLM-created on demand):
+--   1. generate_npc(id, context) tool writes npcs/<adventure>/<id>.lua.
+--   2. Positions tracked in state.gen_npc_locations (separate from npc_locations).
+--   3. move_npc accepts both static and generated NPCs.
+--   4. npc_life_event applies to them too.
+-- ─────────────────────────────────────────────────────────────────────────────
 
 -- ── REQUIRED ─────────────────────────────────────────────────────────────────
 local json        = require("json")
 -- ── OPTIONAL: native GUI visual world (rpgai-gui only) ───────────────────────
 -- local visual = require("lib/visual")  -- tile map + NPC sprites for rpgai-gui
 -- ── OPTIONAL: uncomment as needed ────────────────────────────────────────────
--- local json_repair = require("json_repair")   -- auto-repairs broken LLM JSON
--- local tools_lib   = require("tools")         -- pre-built tool definitions
--- local NPC_lib     = require("npc")           -- code-driven NPC engine
--- local agent       = require("agent")         -- LLM-driven NPC reactions
--- local memory      = require("memory")        -- cross-session persistent memory
--- local world       = require("lib/world")     -- procedural world expansion (NPC/location/object on-demand)
+-- require("lib/json_repair")            -- registers safe_json_decode() as global
+-- local tools_lib   = require("lib/tools")     -- pre-built tool definitions
+-- local NPC_lib     = require("lib/npc")       -- code-driven NPC engine
+-- local agent_lib   = require("lib/agent")     -- LLM-driven NPC reactions
+-- local memory      = require("lib/memory")    -- cross-session persistent memory
+-- local persona     = require("lib/persona")   -- NPC persona files (main + generated)
+-- local world       = require("lib/world")     -- procedural world expansion
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- ── OPTIONAL: per-turn tool call guard (MODE B / C) ──────────────────────────
--- Prevents the LLM from calling the same tool more than once per turn.
--- Pattern: check _tool_calls[name], set it, return error if already set.
--- Reset the table at the start of every turn in before_ai_turn.
--- Each tool fn adds one line: see [TOOL CALL GUARD] comments in [STEP 7].
+-- ── MODE B/C: per-turn tool call guard ───────────────────────────────────────
+-- Reset in before_ai_turn(). Each tool checks _tool_calls[key] before running.
+-- For think_as_npc use key "think_as_npc_"..npc_id.."_result" (cache pattern).
 -- local _tool_calls = {}
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- ── MODE B/C: NPC agent response schema ──────────────────────────────────────
+-- Pass as second arg to agent:decide(). Separates thought from spoken dialogue.
+-- "intent" = internal state, narrate in 3rd person, NEVER quote.
+-- "speech" = exact words said aloud, copy VERBATIM with « » in narration.
+--[==[
+local _NPC_THINK_SCHEMA = [[{
+    "type": "object",
+    "required": ["intent", "speech"],
+    "properties": {
+        "intent": { "type": "string",
+                    "description": "1-2 sentences: what the NPC thinks/feels right now. NOT dialogue." },
+        "speech": { "type": "string",
+                    "description": "Exact words spoken aloud. Empty string if NPC says nothing." }
+    }
+}]]
+]==]
 -- ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -184,9 +313,15 @@ local function default_state()
             max_hp    = 10,
             -- [STEP 3] Add player stats, skills, flags here
         },
-        turn = 0,
-        time = "08:00",
-        day  = "monday",
+        turn         = 0,
+        time         = "08:00",
+        day          = "monday",
+        giorno_index = 1,   -- absolute day counter (day 1, 2, 3…); increment in /sleep command
+
+        -- [STEP 3 — OPTIONAL] Inventory + money
+        -- inventory: free-form string list (no enum). cambia_inventario tool manages it.
+        inventory = {},     -- e.g. { "house keys", "phone", "notebook" }
+        money     = 0,      -- integer, any currency unit
 
         -- [STEP 3 — OPTIONAL] NPC runtime state (if using NPC system)
         npc_locations  = { mira="village_square", guard="stone_bridge" },
@@ -198,9 +333,10 @@ local function default_state()
         npc_activities = {},
         npc_engaged    = { mira=false, guard=false },
         npc_memories   = { mira={}, guard={} },
-        narrative_context = {},  -- hints injected into system prompt by NPC tick
+        narrative_context = {},
 
-        -- [STEP 3 — OPTIONAL] GM notes (in-session, from tools.remember)
+        -- [STEP 3 — OPTIONAL] Notes with scope (from remember tool)
+        -- Each entry: { date="HH:MM day", content="...", scope="player"|"public"|"npc:id" }
         notes = {},
 
         -- [STEP 3] Add world flags, quest states, etc.
@@ -265,11 +401,13 @@ local function init_npcs()
         end
     end
 
-    -- Shared turn counter: max 2 total agent LLM calls per turn
-    turn_counter = agent.new_turn_counter(2)
+    -- Shared turn counter: max N total agent LLM calls per turn across ALL agents
+    turn_counter = agent_lib.new_turn_counter(3)
 
-    -- LLM-driven agent for mira (composed with npc object above)
-    agents["mira"] = agent.new("mira", {
+    -- One agent per NPC. agent:as_tool() works (decodes args_json) but creates
+    -- one tool per NPC; prefer the generic think_as_npc tool in get_tools()
+    -- which dispatches by id and adds per-turn caching + location validation.
+    agents["mira"] = agent_lib.new("mira", {
         system   = "You are Mira, the village innkeeper. "
                 .. "You are warm, sharp-eyed, and know everyone's secrets. "
                 .. "Always stay in character. Reply concisely (2-3 sentences).",
@@ -279,8 +417,9 @@ local function init_npcs()
         turn_counter = turn_counter,  -- shared cap across all agents
         short_term_goals = { "serve the tavern customers" },
         long_term_goals  = { "keep the peace in the village" },
-        memory_enabled   = true,      -- injects memory.lua entries into prompt
+        memory_enabled   = true,
     })
+    -- [STEP 4] Add one agent per NPC here. Same pattern for each.
 end
 
 -- Sync NPC stats/engagement back into state after each tick (for save/load)
@@ -374,6 +513,16 @@ local function npcs_in_location(loc_id)
     return present
 end
 
+-- [STEP 5 — OPTIONAL] Debug tool logger
+-- Set DEBUG_LOG=true at module level to enable. Collects tool call trace in _dbg_tools.
+-- local DEBUG_LOG = false
+-- local _dbg_tools = {}
+-- local function _log_tool(name, args, result)
+--     if not DEBUG_LOG then return end
+--     table.insert(_dbg_tools, { name=name, args=args,
+--         result=type(result)=="string" and result:sub(1,200) or tostring(result) })
+-- end
+
 -- [STEP 5 — OPTIONAL] Time system
 local DAYS = { "monday","tuesday","wednesday","thursday","friday","saturday","sunday" }
 local function advance_time(minutes)
@@ -415,21 +564,103 @@ What is your name, traveler?
 end
 
 -- ---------------------------------------------------------------------------
--- Called after the player types their name (or any first-turn text).
+-- [OPTIONAL] Character-creation questionnaire.
+-- Return a list of scripted questions asked BEFORE the game starts. The engine
+-- drives the Q&A in the UI, collects answers as { field = answer }, and passes
+-- them to set_initial_state() as a JSON string.
+--   type = "text"   → free-text answer
+--   type = "choice" → quick-pick buttons (player can still type a custom value)
+-- Keep questions to ESTETICA the NPCs can SEE (body, hair, clothes) — not
+-- personality. Personality the game can't enforce is wasted text; visible
+-- traits feed NPC reactions, narration, and image generation.
+-- Delete this function entirely to keep the classic single-name prompt.
+-- ---------------------------------------------------------------------------
+function get_character_questions()
+    return {
+        { field="name",    prompt="Come ti chiami?",            type="text" },
+        { field="eta",     prompt="Quanti anni hai?",           type="text" },
+        { field="sesso",   prompt="Sesso?",                     type="choice",
+          options={ "uomo", "donna" } },
+        { field="capelli", prompt="Com'è la tua capigliatura?", type="choice",
+          options={ "corti scuri", "lunghi biondi", "rasati", "ricci castani", "brizzolati" } },
+        { field="corpo",   prompt="Corporatura?",               type="choice",
+          options={ "atletico", "esile", "robusto", "minuto" } },
+        { field="vestiti", prompt="Come sei vestito?",          type="text" },
+    }
+end
+
+-- ---------------------------------------------------------------------------
+-- Called after the player finishes the questionnaire (or types their name).
+-- When get_character_questions() exists, `player_input` is a JSON string of all
+-- answers. Otherwise it is the raw name (classic flow). Handle both.
 -- ---------------------------------------------------------------------------
 function set_initial_state(player_input)
     state = default_state()
-    if player_input and player_input ~= "" then
+
+    local answers = nil
+    if player_input and player_input:match("^%s*{") then
+        local ok, decoded = pcall(json.decode, player_input)
+        if ok then answers = decoded end
+    end
+
+    if answers then
+        state.player.name = answers.name or "Adventurer"
+        -- One source for visible traits → NPC prompts + image prompts + arrival.
+        -- adv.player_appearance() reads state.player.appearance / .outfit.
+        state.player.appearance = string.format(
+            "%s, %s anni, corporatura %s, capelli %s.",
+            answers.sesso or "?", answers.eta or "?",
+            answers.corpo or "?", answers.capelli or "?")
+        state.player.outfit = answers.vestiti or ""
+        -- [OPTIONAL] register the player as a persona for uniform handling:
+        -- persona.register_static("player", {
+        --     name=state.player.name, age=tonumber(answers.eta),
+        --     appearance=state.player.appearance, outfit_override=state.player.outfit })
+        -- then: state.player.appearance = persona.format_appearance("player")
+    elseif player_input and player_input ~= "" then
         state.player.name = player_input
     end
+
     -- [STEP 6 — OPTIONAL] Init NPC objects after state is ready
     -- init_npcs()
     -- run_npc_tick()
 end
 
--- Called if the player pressed Enter with empty input.
+-- Called if the player pressed Enter with empty input (no questionnaire).
 function generate_initial_state()
     set_initial_state("Adventurer")
+end
+
+-- ---------------------------------------------------------------------------
+-- [OPTIONAL] Arrival scene. Called once after set_initial_state(), before the
+-- first player turn. Return a narration string shown as turn 0. The master owns
+-- the prompt template; the LLM weaves in the player's visible traits and the
+-- NPCs currently present (or just generated). Delete to skip the arrival scene.
+-- ---------------------------------------------------------------------------
+function generate_arrival()
+    local sys = [[Sei il narratore di questa avventura. Scrivi la scena d'arrivo
+del protagonista in seconda persona, 3-5 frasi, atmosferica. Descrivi come gli
+altri presenti lo vedono in base al suo aspetto. Non inventare azioni del
+giocatore: descrivi solo l'ambiente, l'arrivo e le prime reazioni.]]
+
+    local loc = LOCATIONS[state.player.location] or {}
+    local present = npcs_in_location(state.player.location)
+    local user = table.concat({
+        "Protagonista: " .. (adv and adv.player_appearance() or state.player.name),
+        "Luogo: " .. (loc.name or state.player.location) .. " — " .. (loc.desc or ""),
+        "Presenti: " .. (next(present) and json.encode(present) or "nessuno"),
+    }, "\n")
+
+    -- query_llm(sys, history_json, user, schema, model, provider, label)
+    local schema = [[{ "type":"object", "required":["narration"],
+                       "properties":{ "narration":{"type":"string"} } }]]
+    local ok, reply = pcall(query_llm, sys, "[]", user, schema, nil, nil, "narrator")
+    if not ok then return "" end
+    local okd, data = pcall(json.decode, reply)
+    if okd and type(data) == "table" and not data.error and data.narration then
+        return data.narration
+    end
+    return ""  -- LLM failed or returned no narration → skip the arrival scene
 end
 
 -- ---------------------------------------------------------------------------
@@ -560,12 +791,28 @@ function get_system_prompt()
 
     -- ── PART 6: Injected context (dynamic each turn) ───────────────────────
 
-    -- GM notes (stored by tools.remember / tools.forget)
+    -- Notes with scope (from remember tool).
+    -- scope="player" and "public" go into master prompt.
+    -- scope="npc:id" is injected only into think_as_npc for that NPC (handled in tool fn).
     local notes_block = ""
     if state.notes and #state.notes > 0 then
-        notes_block = "\n\n## GM NOTES\n"
-        for _, note in ipairs(state.notes) do
-            notes_block = notes_block .. "- " .. note .. "\n"
+        local player_notes, public_notes = {}, {}
+        for _, n in ipairs(state.notes) do
+            if type(n) == "string" then
+                table.insert(player_notes, n)  -- backward compat
+            elseif n.scope == "public" then
+                table.insert(public_notes, n.content or "")
+            elseif (not n.scope) or n.scope == "player" then
+                table.insert(player_notes, n.content or "")
+            end
+        end
+        if #player_notes > 0 then
+            notes_block = notes_block .. "\n\n## PERSONAL NOTES (only you know)\n"
+            for _, n in ipairs(player_notes) do notes_block = notes_block .. "- " .. n .. "\n" end
+        end
+        if #public_notes > 0 then
+            notes_block = notes_block .. "\n\n## PUBLIC FACTS (everyone knows)\n"
+            for _, n in ipairs(public_notes) do notes_block = notes_block .. "- " .. n .. "\n" end
         end
     end
 
@@ -589,46 +836,43 @@ function get_system_prompt()
 
     -- ── PART 7: WORKFLOW + TOOL RULES (MODE B / C only) ───────────────────
     -- [STEP 6 — MODE A] Delete this block entirely if NOT using tool calling.
-    -- [STEP 6 — MODE B/C] Uncomment and list EVERY tool with its calling rule.
+    -- [STEP 6 — MODE B/C] Uncomment and adapt to the tools you actually register.
     local tool_rules = ""
-    --[[
+    --[==[
     tool_rules = [[
 
-════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════
 WORKFLOW — MANDATORY ORDER (call tools BEFORE narrating)
-════════════════════════════════════════════════════
- 1. generate_npc        — new NPC encountered face-to-face. MAX 2/turn.
- 2. think_as_npc       — NPC reaction/dialogue. Cached per turn. "speech" → VERBATIM in narration.
- 3. advance_time       — BEFORE any action that takes time. MAX 1/turn.
- 4. move_player        — explicit player movement to new location.
- 5. generate_location  — location never visited before. BEFORE entering it.
- 6. generate_object    — new interactable object. BEFORE describing/using it.
- 7. object_action      — action on existing object (open, read, use, examine).
- 8. object_write       — write content into object (bulletin board, mailbox, register).
- 9. move_npc           — NPC movement not covered by routine. BEFORE narrating it.
-10. npc_life_event     — permanent change to an NPC (agreement, trauma, change). Persists to disk.
-11. remember           — SUBJECTIVE player note (scope: player=only you, public=everyone knows, npc=shared with one NPC).
-12. memory_write       — OBJECTIVE fact about an NPC, cross-session. Only from think_as_npc or direct input. MAX 3/turn.
-13. memory_read        — read a persistent fact about an NPC.
-THEN: write narration. STOP.
+════════════════════════════════════════════════════════════════
+ 1. [opt] think_as_npc(id, situation) — NPC reaction. Cached/turn. MAX 1 per NPC.
+ 2. [opt] advance_time(minutes)       — BEFORE any action that takes time. MAX 1/turn.
+ 3. [opt] move_player(location)       — explicit player movement. MAX 1/turn.
+ 4. [opt] move_npc(id, location)      — NPC movement before narrating it. MAX 1/NPC/turn.
+ 5. [opt] set_activity(npc, activity) — update NPC activity without moving. MAX 1/NPC/turn.
+ 6. [opt] cambia_inventario(...)      — ONLY on explicit pickup/drop/spend/earn. FORBIDDEN for implied costs.
+ 7. [opt] remember(note, scope)       — player note. scope: player|public|npc. MAX 2/turn.
+ 8. [opt] generate_npc(id, context)   — new NPC met face-to-face. MAX 2/turn.
+ 9. [opt] generate_location(id)       — location never visited. BEFORE entering it.
+10. [opt] generate_object(id)         — new object. BEFORE describing/using it.
+11. [opt] object_action(id, action)   — action on existing object.
+12. [opt] npc_life_event(id, patch)   — permanent NPC change. Persists to disk.
+13. [opt] memory_write(entity, ...)   — confirmed fact about an NPC. MAX 3/turn.
+14. [opt] memory_read(entity, ...)    — read persistent fact.
+Then: write narration. STOP.
 
-════════════════════════════════════════
-TOOL CALLING RULES
-════════════════════════════════════════
-advance_time     — BEFORE narrating any action that takes time. MAX 1 per turn.
-move_player      — ONLY if player explicitly moves. NOT if already in the room.
-generate_location — BEFORE entering a place that does not exist yet. Idempotent.
-generate_object  — BEFORE describing or interacting with an object seen for the first time.
-object_action    — Use on objects that already exist. Do NOT call generate_object first if the object is known.
-move_npc         — BEFORE narrating an NPC in a new location. MAX 1 per NPC per turn.
-think_as_npc     — ONCE per NPC per turn. Cached: repeating returns same result.
-                   "speech" field = exact words → quote VERBATIM in narration. Do not paraphrase.
-remember         — player's subjective notes. Use scope=public for facts everyone in the world knows.
-memory_write     — persistent entity facts only (from think_as_npc or direct player input). Not for deductions.
+CRITICAL — think_as_npc returns { "intent": "...", "speech": "..." }:
+  "intent" = internal state — narrate in 3RD PERSON, NEVER quote with «».
+  "speech" = exact words spoken aloud — copy VERBATIM between «». Empty = silence.
+
+RULES:
+think_as_npc  — only if NPC is in same location as player. Cached: repeat = same result.
+move_player   — ONLY on explicit movement. NOT if player is already in the room.
+advance_time  — BEFORE narrating time-consuming actions. MAX 1/turn.
+move_npc      — BEFORE narrating NPC in new location. MAX 1 per NPC/turn.
+memory_write  — confirmed facts only. NOT intentions, deductions, or future plans.
 ]]
-    -- [STEP 6] Add your custom tools here following the same pattern:
-    -- my_tool — when to call it, how many times max per turn, what it must NOT be used for.
-    ]]--
+    -- [STEP 6] Add your custom tools here following the same pattern.
+    ]==]
 
     return header .. rules .. location_block
         .. npc_pos_block .. personality_block
@@ -722,29 +966,31 @@ end
 -- If validation fails, return { success=false, error="..." } and the engine retries.
 -- ---------------------------------------------------------------------------
 function process_ai_response(reply)
-    -- [STEP 6 — OPTIONAL] Use json_repair if getting malformed responses:
-    -- local ok, r = pcall(json.decode, json_repair.repair(reply))
-    local ok, r = pcall(json.decode, reply)
-    if not ok or type(r) ~= "table" then
-        return { success=false, error="Invalid JSON: " .. tostring(r) }
+    -- Use safe_json_decode (registered by require("lib/json_repair")) for auto-repair.
+    -- Falls back to plain decode if json_repair not loaded.
+    local r, _, err
+    if safe_json_decode then
+        r, _, err = safe_json_decode(reply)
+    else
+        local ok; ok, r = pcall(json.decode, reply)
+        if not ok then err = r; r = nil end
+    end
+    if not r or type(r) ~= "table" then
+        return { success=false, error="Invalid JSON: " .. tostring(err or reply) }
     end
     if not r.narration or r.narration == "" then
         return { success=false, error="Missing narration" }
     end
 
-    -- Move player
-    if r.new_location and r.new_location ~= "" then
-        local valid = LOCATIONS[r.new_location]
-        if valid then
-            -- [STEP 6] Add movement restriction checks here:
-            -- if r.new_location == "locked_room" and not state.quest_flags.has_key then ...
-            state.player.location = r.new_location
-        end
+    -- MODE A only: move player and advance time from schema fields.
+    -- In MODE B/C these are handled by move_player / advance_time tools — delete these blocks.
+    if r.new_location and r.new_location ~= "" and LOCATIONS[r.new_location] then
+        -- [STEP 6] Add movement restriction checks here if needed.
+        state.player.location = r.new_location
     end
-
-    -- Advance time
-    local mins = tonumber(r.time_passes) or 30
-    if mins > 0 then advance_time(mins) end
+    if r.time_passes and tonumber(r.time_passes) and tonumber(r.time_passes) > 0 then
+        advance_time(tonumber(r.time_passes))
+    end
 
     -- Pick up items
     if type(r.picked_up) == "table" then
@@ -836,11 +1082,16 @@ function process_player_input(input)
     end
 
     if cmd == "/map" or cmd == "/exits" then
-        local exits = TRAVEL_MAP[state.player.location] or {}
-        local lines = { "Exits:" }
+        local loc_id = state.player.location
+        local exits  = TRAVEL_MAP[loc_id] or {}
+        local cur    = LOCATIONS[loc_id]
+        local lines  = {
+            "Location: " .. (cur and cur.name or loc_id) .. "  [" .. loc_id .. "]",
+            "Exits:"
+        }
         for _, id in ipairs(exits) do
             local dest = LOCATIONS[id]
-            table.insert(lines, "  • " .. (dest and dest.name or id))
+            table.insert(lines, "  • " .. (dest and dest.name or id) .. "  [" .. id .. "]")
         end
         return { success=true, handled=true, output=table.concat(lines, "\n") }
     end
@@ -884,20 +1135,29 @@ function get_display_state()
         end
     end
     table.sort(npcs_here)
-    return string.format("[ %s  |  %s %s  |  HP:%d/%d  G:%d  Inv:%s%s ]",
+    -- [STEP 6] Adapt fields to your adventure (remove HP/gold if not used, add money etc.)
+    local inv = state.inventory or state.player.inventory or {}
+    local inv_str = #inv > 0 and table.concat(inv, ", ") or "(empty)"
+    return string.format("[ %s  |  %s %s  |  📍%s  |  here: %s ]\n[ HP:%d/%d  💰%d  🎒%s ]",
         state.player.name,
         state.time, state.day,
-        state.player.hp, state.player.max_hp,
-        state.player.gold,
-        inventory_string(),
-        #npcs_here > 0 and ("  |  " .. table.concat(npcs_here, ", ")) or "")
+        loc and loc.name or state.player.location,
+        #npcs_here > 0 and table.concat(npcs_here, ", ") or "—",
+        state.player.hp or 0, state.player.max_hp or 0,
+        state.money or state.player.gold or 0,
+        inv_str)
 end
 
 -- ---------------------------------------------------------------------------
 -- Save / Load
 -- ---------------------------------------------------------------------------
 function get_state_snapshot()
-    return json.encode(state)
+    local snap = {}
+    for k, v in pairs(state) do snap[k] = v end
+    -- [STEP 6 — OPTIONAL] Include agent history snapshots:
+    -- snap._agents = {}
+    -- for id, ag in pairs(agents) do snap._agents[id] = ag:agent_snapshot() end
+    return json.encode(snap)
 end
 
 function restore_state(snapshot)
@@ -905,9 +1165,16 @@ function restore_state(snapshot)
     if not ok then
         return { success=false, error="Failed to parse snapshot: " .. tostring(data) }
     end
+    -- [STEP 6 — OPTIONAL] Restore agent history:
+    -- local agent_data = data._agents; data._agents = nil
     state = data
-    -- [STEP 6 — OPTIONAL] Re-init NPC objects after load
+    -- Re-init NPC objects after load (they are not JSON-serialisable):
     -- init_npcs()
+    -- if agent_data then
+    --     for id, snap_str in pairs(agent_data) do
+    --         if agents[id] then agents[id]:agent_restore(snap_str) end
+    --     end
+    -- end
     return { success=true }
 end
 
@@ -928,40 +1195,295 @@ end
 -- =============================================================================
 -- [STEP 7 — OPTIONAL] TOOLS
 -- Enable tool calling so the LLM can trigger actions from within a turn.
--- Delete this function if not using tool calling.
--- Requires a provider that supports tool calling (OpenAI, OpenRouter, Claude).
+-- Requires: MODE B or C, provider with tool calling (OpenAI, OpenRouter, Claude).
+-- Delete this function entirely if using MODE A (schema-only).
+--
+-- NOTE: agent:as_tool() works (one tool per NPC), but the generic think_as_npc
+-- stub below is preferred: single tool, per-turn cache, location validation.
 -- =============================================================================
 --[==[
 function get_tools()
-    -- Uncomment only the tools you actually need.
     return tools_lib.build({
 
-        -- Dice rolls — essential for any game with skill checks or combat
-        tools_lib.roll_dice(state),
+        -- ── think_as_npc — generic, dispatches by id ─────────────────────────
+        -- One tool for ALL NPCs. Never create per-NPC tools (think_as_mira etc).
+        -- Cached per turn: repeated calls for same id return the same result.
+        {
+            name = "think_as_npc",
+            description = "Ask an NPC how they react to the current situation. "
+                       .. "Only call if the NPC is in the same location as the player. "
+                       .. "Cached per turn — repeat calls return the same result. "
+                       .. "Returns {intent, speech}. "
+                       .. "'intent' = internal state — narrate in 3RD PERSON, NEVER quote. "
+                       .. "'speech' = exact words spoken — copy VERBATIM between «» in narration. "
+                       .. "Empty 'speech' = NPC says nothing this turn.",
+            params = [[{
+                "type": "object",
+                "required": ["id", "situation"],
+                "properties": {
+                    "id":        { "type": "string",
+                                   "description": "NPC id (e.g. 'mira', 'guard')" },
+                    "situation": { "type": "string",
+                                   "description": "Observable facts only: what happened, where, what was said. Neutral — do NOT describe the expected response." }
+                }
+            }]],
+            fn = function(args_json)
+                local a      = json.decode(args_json)
+                local npc_id = a.id or ""
+                local cache  = "think_as_npc_" .. npc_id
+                if _tool_calls[cache .. "_result"] then
+                    return _tool_calls[cache .. "_result"]
+                end
+                if not agents[npc_id] then
+                    return json.encode({ error="NPC '" .. npc_id .. "' has no agent." })
+                end
+                _tool_calls[cache] = true
+                -- Inject public + npc-specific notes into situation
+                local situation = a.situation or ""
+                local shared = {}
+                for _, n in ipairs(state.notes or {}) do
+                    if type(n) == "table" then
+                        if n.scope == "public" or n.scope == ("npc:" .. npc_id) then
+                            table.insert(shared, n.content or "")
+                        end
+                    end
+                end
+                if #shared > 0 then
+                    situation = situation .. "\n[Recent shared info: " .. table.concat(shared, "; ") .. "]"
+                end
+                local result = agents[npc_id]:decide(situation, _NPC_THINK_SCHEMA)
+                _tool_calls[cache .. "_result"] = result
+                return result
+            end,
+        },
 
-        -- Skill checks — requires state.player.skills = { skill_name = bonus }
-        -- tools_lib.skill_check(state),
+        -- ── move_player ───────────────────────────────────────────────────────
+        -- Call BEFORE narrating movement. Validates against TRAVEL_MAP.
+        {
+            name = "move_player",
+            description = "Move the player to a new location. "
+                       .. "Call BEFORE narrating the movement. "
+                       .. "Only if player explicitly moves. NOT if already in the room. MAX 1/turn.",
+            params = [[{
+                "type": "object",
+                "required": ["location"],
+                "properties": {
+                    "location": { "type": "string", "description": "location_id of destination" }
+                }
+            }]],
+            fn = function(args_json)
+                if _tool_calls["move_player"] then
+                    return json.encode({ error="move_player already called this turn." })
+                end
+                _tool_calls["move_player"] = true
+                local a   = json.decode(args_json)
+                local loc = a.location or ""
+                if not LOCATIONS[loc] then
+                    return json.encode({ error="Unknown location: " .. loc })
+                end
+                local exits = TRAVEL_MAP[state.player.location] or {}
+                local valid = false
+                for _, e in ipairs(exits) do if e == loc then valid = true; break end end
+                if not valid then
+                    return json.encode({ error="'" .. loc .. "' not reachable from here." })
+                end
+                state.player.location = loc
+                -- [STEP 7] Add per-location side-effects here (e.g. set flags).
+                local dest = LOCATIONS[loc]
+                return json.encode({ ok=true, location=loc, name=dest and dest.name or loc })
+            end,
+        },
 
-        -- Inventory check — useful for trade and crafting
-        -- tools_lib.inventory_check(state),
+        -- ── move_npc ─────────────────────────────────────────────────────────
+        -- Call BEFORE narrating NPC in new location. MAX 1 per NPC per turn.
+        {
+            name = "move_npc",
+            description = "Move an NPC to a new location. "
+                       .. "Call BEFORE narrating the movement. MAX 1 per NPC per turn.",
+            params = [[{
+                "type": "object",
+                "required": ["id", "location"],
+                "properties": {
+                    "id":       { "type": "string", "description": "NPC id" },
+                    "location": { "type": "string", "description": "destination location_id" },
+                    "activity": { "type": "string", "description": "What the NPC is doing there (optional)" }
+                }
+            }]],
+            fn = function(args_json)
+                local a   = json.decode(args_json)
+                local id  = a.id or ""
+                local key = "move_npc_" .. id
+                if _tool_calls[key] then
+                    return json.encode({ error="move_npc already called this turn for " .. id .. "." })
+                end
+                if not NPC_DATA[id] then
+                    return json.encode({ error="NPC not found: " .. id })
+                end
+                _tool_calls[key] = true
+                state.npc_locations[id] = a.location
+                if a.activity and a.activity ~= "" then
+                    state.npc_activities        = state.npc_activities or {}
+                    state.npc_activities[id]    = a.activity
+                end
+                return json.encode({ ok=true, id=id, location=a.location })
+            end,
+        },
 
-        -- GM notes — short narrative facts the LLM can store and retrieve.
-        -- WARNING: in complex MODE B scripts these tools cause call explosions:
-        -- the LLM accumulates 10-15 notes per session and cycles remember/forget
-        -- every turn. If you see [TOOL LOOP] in logs, remove these two lines first.
-        -- Use memory_write below for anything that needs to persist cross-session.
-        -- tools_lib.remember(state),
-        -- tools_lib.forget(state),
+        -- ── advance_time ──────────────────────────────────────────────────────
+        -- Call BEFORE narrating any time-consuming action. MAX 1/turn.
+        {
+            name = "advance_time",
+            description = "Advance game time. "
+                       .. "Call BEFORE narrating any action that takes time. MAX 1/turn.",
+            params = [[{
+                "type": "object",
+                "required": ["minutes"],
+                "properties": {
+                    "minutes": { "type": "integer", "minimum": 1, "maximum": 480,
+                                 "description": "Minutes to advance" }
+                }
+            }]],
+            fn = function(args_json)
+                if _tool_calls["advance_time"] then
+                    return json.encode({ error="advance_time already called this turn." })
+                end
+                _tool_calls["advance_time"] = true
+                local a = json.decode(args_json)
+                advance_time(math.max(1, math.min(480, tonumber(a.minutes) or 30)))
+                return json.encode({ ok=true, time=state.time, day=state.day })
+            end,
+        },
 
-        -- Persistent memory (cross-session) — read/write via main LLM only
+        -- ── set_activity ──────────────────────────────────────────────────────
+        -- Update what an NPC is doing without moving them. MAX 1 per NPC per turn.
+        {
+            name = "set_activity",
+            description = "Update what an NPC is doing in their current location. "
+                       .. "MAX 1 per NPC per turn.",
+            params = [[{
+                "type": "object",
+                "required": ["id", "activity"],
+                "properties": {
+                    "id":       { "type": "string", "description": "NPC id" },
+                    "activity": { "type": "string", "description": "Short activity description (max 15 words)" }
+                }
+            }]],
+            fn = function(args_json)
+                local a   = json.decode(args_json)
+                local id  = a.id or ""
+                local key = "set_activity_" .. id
+                if _tool_calls[key] then
+                    return json.encode({ error="set_activity already called this turn for " .. id })
+                end
+                _tool_calls[key] = true
+                if not NPC_DATA[id] and not (state.npc_locations or {})[id] then
+                    return json.encode({ error="NPC not found: " .. id })
+                end
+                state.npc_activities        = state.npc_activities or {}
+                state.npc_activities[id]    = a.activity
+                return json.encode({ ok=true, id=id, activity=a.activity })
+            end,
+        },
+
+        -- ── cambia_inventario ─────────────────────────────────────────────────
+        -- Modify player inventory and/or money. Free-form item names (no enum).
+        -- ONLY call on explicit player action — NEVER for implied narrative costs.
+        {
+            name = "cambia_inventario",
+            description = "Modify player inventory and/or money. "
+                       .. "Call ONLY when the player explicitly picks up, drops, buys, sells, or spends. "
+                       .. "FORBIDDEN for implied/background costs the player didn't describe.",
+            params = [[{
+                "type": "object",
+                "properties": {
+                    "add":    { "type": "array", "items": { "type": "string" },
+                                "description": "Items received or picked up." },
+                    "remove": { "type": "array", "items": { "type": "string" },
+                                "description": "Items used, given away, or lost. Use exact name already in inventory." },
+                    "money":  { "type": "integer",
+                                "description": "Money delta: positive=earned, negative=spent." }
+                }
+            }]],
+            fn = function(args_json)
+                local a = json.decode(args_json)
+                state.inventory = state.inventory or {}
+                state.money     = state.money     or 0
+                if type(a.remove) == "table" then
+                    for _, item in ipairs(a.remove) do
+                        for i, existing in ipairs(state.inventory) do
+                            if existing:lower() == item:lower() then
+                                table.remove(state.inventory, i); break
+                            end
+                        end
+                    end
+                end
+                if type(a.add) == "table" then
+                    for _, item in ipairs(a.add) do
+                        table.insert(state.inventory, item)
+                    end
+                end
+                if type(a.money) == "number" then
+                    state.money = state.money + a.money
+                end
+                -- _log_tool("cambia_inventario", a, "ok")
+                return json.encode({ ok=true, inventory=state.inventory, money=state.money })
+            end,
+        },
+
+        -- ── remember ──────────────────────────────────────────────────────────
+        -- Player notes with scope. scope="npc:id" gets injected into think_as_npc for that NPC.
+        {
+            name = "remember",
+            description = "Save a note for future turns. MAX 2/turn. "
+                       .. "scope: 'player'=only you (default), "
+                       .. "'public'=fact everyone in the world knows, "
+                       .. "'npc:id'=shared only with a specific NPC.",
+            params = [[{
+                "type": "object",
+                "required": ["note"],
+                "properties": {
+                    "note":   { "type": "string", "description": "Short fact (max 20 words)." },
+                    "scope":  { "type": "string", "enum": ["player","public","npc"],
+                                "description": "Who knows this fact." },
+                    "npc_id": { "type": "string",
+                                "description": "If scope='npc', the NPC id." }
+                }
+            }]],
+            fn = function(args_json)
+                _tool_calls["rem_count"] = (_tool_calls["rem_count"] or 0) + 1
+                if _tool_calls["rem_count"] > 2 then
+                    return json.encode({ error="remember: max 2/turn." })
+                end
+                local a     = json.decode(args_json)
+                local note  = (a.note or ""):match("^%s*(.-)%s*$")
+                if note == "" then return json.encode({ error="empty note" }) end
+                local scope = a.scope or "player"
+                if scope == "npc" and a.npc_id and a.npc_id ~= "" then
+                    scope = "npc:" .. a.npc_id
+                end
+                state.notes = state.notes or {}
+                table.insert(state.notes, {
+                    date    = state.time .. " " .. state.day,
+                    content = note,
+                    scope   = scope,
+                })
+                if #state.notes > 25 then table.remove(state.notes, 1) end
+                -- _log_tool("remember", { note=note, scope=scope }, "ok")
+                return json.encode({ ok=true, note=note, scope=scope })
+            end,
+        },
+
+        -- ── Persistent memory (cross-session) ─────────────────────────────────
         {
             name = "memory_write",
-            description = "Save a persistent fact about an entity (NPC, location, player).",
+            description = "Save a confirmed fact about an NPC — only what physically happened "
+                       .. "or was said VERBATIM. FORBIDDEN: future tense, inferred emotions, "
+                       .. "plans not yet acted on. MAX 3/turn.",
             params = [[{ "type":"object", "required":["entity","category","content"],
                          "properties": {
                              "entity":   { "type":"string" },
                              "category": { "type":"string" },
-                             "content":  { "type":"string" }
+                             "content":  { "type":"string", "description": "max 30 words" }
                          }}]],
             fn = function(args_json)
                 local a = json.decode(args_json)
@@ -984,59 +1506,24 @@ function get_tools()
             end,
         },
 
-        -- ── Custom tools — [TOOL CALL GUARD] pattern ──────────────────────────
-        -- To prevent the LLM from calling the same tool twice per turn:
-        --   1. Declare: local _tool_calls = {} at the top of the file.
-        --   2. Reset:   _tool_calls = {} in before_ai_turn (see [STEP 8]).
-        --   3. In each tool fn, add these two lines before doing anything:
-        --        if _tool_calls["my_tool"] then
-        --            return json.encode({ error="my_tool already called this turn" })
-        --        end
-        --        _tool_calls["my_tool"] = true
-        --   The LLM sees the error in the tool result and stops retrying.
-        --
-        -- NPC lock (if using npc.lua sequences):
-        --   Before moving an NPC via a move_npc tool, check:
-        --     if npcs[npc_name] and npcs[npc_name].current_sequence ~= nil then
-        --         return json.encode({ error="NPC is managed by NPC system this turn" })
-        --     end
-        --
-        -- [STEP 7] Add your custom tools here:
+        -- ── Custom tool stub ──────────────────────────────────────────────────
+        -- Copy this block for each custom tool. Remember to add it to WORKFLOW.
         -- {
         --     name = "my_tool",
-        --     description = "What this tool does. MAX 1 call per turn.",
-        --     params = '{ "type":"object", "required":["arg1"], "properties": { "arg1": { "type":"string" } } }',
+        --     description = "What this tool does. MAX 1/turn.",
+        --     params = [[{ "type":"object", "required":["arg1"],
+        --                  "properties": { "arg1": { "type":"string" } } }]],
         --     fn = function(args_json)
         --         if _tool_calls["my_tool"] then
-        --             return json.encode({ error="my_tool already called this turn" })
+        --             return json.encode({ error="my_tool already called this turn." })
         --         end
         --         _tool_calls["my_tool"] = true
         --         local a = json.decode(args_json)
         --         -- do something with a.arg1
-        --         return json.encode({ result = "ok" })
+        --         return json.encode({ ok=true })
         --     end,
         -- },
 
-        -- ── LLM-driven NPC agent tool (if using agent.lua) ───────────────────
-        -- The description of this tool is what the main LLM reads before calling it.
-        -- Include the verbatim-dialogue instruction directly in the description so
-        -- the LLM knows to carry the agent's words into the narration.
-        -- agents["mira"]:as_tool("think_as_mira",
-        --     "Ask Mira how she reacts to the current situation. "
-        --     .. "IMPORTANT: any dialogue Mira speaks in the response must appear "
-        --     .. "VERBATIM in the narration — do not paraphrase or omit her words."),
-
-        -- [STEP 7] Add your custom tools here:
-        -- {
-        --     name = "my_tool",
-        --     description = "What this tool does.",
-        --     params = '{ "type":"object", "required":["arg1"], "properties": { "arg1": { "type":"string" } } }',
-        --     fn = function(args_json)
-        --         local a = json.decode(args_json)
-        --         -- do something with a.arg1
-        --         return json.encode({ result = "ok" })
-        --     end,
-        -- },
     })
 end
 ]==]--
@@ -1051,11 +1538,9 @@ end
 
 --[[
 function before_ai_turn(player_input)
-    -- [TOOL CALL GUARD] Reset per-turn call tracker (if using anti-loop pattern)
-    -- _tool_calls = {}
-
-    -- Reset agent per-turn caches and shared turn counter
-    agent.reset_all_turns(agents, turn_counter)
+    -- Reset tool call guard and agent caches every turn (required for MODE B/C).
+    _tool_calls = {}
+    agent_lib.reset_all_turns(agents, turn_counter)
 
     -- Run code-driven NPC tick BEFORE the LLM sees the input
     -- run_npc_tick()
@@ -1405,7 +1890,7 @@ end
 -- Delete this section if using static hand-crafted NPCs only.
 -- =============================================================================
 
---[[
+--[==[
 
 -- 1. Require at the top:
 --    local persona = require("lib/persona")
@@ -1490,7 +1975,7 @@ end
 --        "type": "object",
 --        "required": ["intent", "speech"],
 --        "properties": {
---            "intent": { "type": "string", "description": "1-2 sentences: what the NPC wants, emotional state. For master LLM only." },
+--            "intent": { "type": "string", "description": "1-2 sentences: what the NPC is thinking/feeling right now — tensions, doubts, resistance. NOT a statement of desire toward the interaction." },
 --            "speech": { "type": "string", "description": "Exact words the NPC speaks. Copy VERBATIM to narration." }
 --        }
 --    }]]
@@ -1515,7 +2000,7 @@ end
 --                params = [[{ "type":"object", "required":["id","situation"],
 --                             "properties": {
 --                                 "id":        { "type":"string" },
---                                 "situation": { "type":"string" }
+--                                 "situation": { "type":"string", "description": "Observable facts only: what happened, where, what was said. Neutral — do NOT describe the expected response or what you want the NPC to say." }
 --                             }}]],
 --                fn = function(args_json)
 --                    local a = json.decode(args_json)
@@ -1596,7 +2081,7 @@ end
 -- format; agent_system must be >= 80 chars. Rejected generations are logged to
 -- /tmp/persona_generate_reject.log and return nil (caller can retry).
 
-]]--
+]==]
 
 
 -- =============================================================================

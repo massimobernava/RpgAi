@@ -46,6 +46,7 @@ end
 -- @param category  String sub-key (e.g. "relationship", "secret", "mood")
 -- @param content   String value to store
 function M.write(entity, category, content)
+    entity = entity:lower()
     if not _data[entity] then _data[entity] = {} end
     _data[entity][category] = tostring(content)
     M._save()
@@ -56,6 +57,7 @@ end
 -- @param category  String sub-key
 -- @return          Stored string, or nil if not found
 function M.read(entity, category)
+    entity = entity:lower()
     if not _data[entity] then return nil end
     return _data[entity][category]
 end
@@ -64,6 +66,7 @@ end
 -- @param entity  String key
 -- @return        Table of { category -> content }, or empty table
 function M.read_all(entity)
+    entity = entity:lower()
     return _data[entity] or {}
 end
 
@@ -71,6 +74,7 @@ end
 -- @param entity    String key
 -- @param category  String sub-key
 function M.forget(entity, category)
+    entity = entity:lower()
     if _data[entity] then
         _data[entity][category] = nil
         if next(_data[entity]) == nil then _data[entity] = nil end
@@ -81,6 +85,7 @@ end
 --- Remove all memory entries for an entity.
 -- @param entity  String key
 function M.forget_entity(entity)
+    entity = entity:lower()
     if _data[entity] then
         _data[entity] = nil
         M._save()
@@ -95,9 +100,26 @@ function M.list_entities()
     return list
 end
 
---- Returns the full memory database as a JSON string (for debugging).
+--- Returns the full memory database as a JSON string (for snapshot/restore).
 function M.dump()
     return json.encode(_data)
+end
+
+--- Restore memory from a snapshot string (produced by dump()).
+-- Also writes to disk so the file stays in sync.
+function M.restore(snapshot)
+    if not snapshot or snapshot == "" then return end
+    local ok, parsed = pcall(json.decode, snapshot)
+    if ok and type(parsed) == "table" then
+        _data = parsed
+        M._save()
+    end
+end
+
+--- Clear all memory (call on new game start so fresh sessions have no history).
+function M.clear()
+    _data = {}
+    M._save()
 end
 
 --- Format all memories for a given entity as a readable string.
@@ -105,6 +127,7 @@ end
 -- @param entity  String key
 -- @return        Human-readable multi-line string
 function M.format_entity(entity)
+    entity = entity:lower()
     local entries = _data[entity]
     if not entries then return "" end
     local lines = {}
@@ -116,13 +139,16 @@ function M.format_entity(entity)
 end
 
 --- Persist the current state to disk.
+-- Atomic: temp file + rename, so a crash mid-write never truncates the
+-- memory file (same discipline as the engine's cache_db.json).
 function M._save()
     if not _path then return end
-    local f = io.open(_path, "w")
-    if f then
-        f:write(json.encode(_data))
-        f:close()
-    end
+    local tmp = _path .. ".tmp"
+    local f = io.open(tmp, "w")
+    if not f then return end
+    f:write(json.encode(_data))
+    f:close()
+    os.rename(tmp, _path)
 end
 
 return M

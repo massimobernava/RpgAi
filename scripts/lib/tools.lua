@@ -21,7 +21,84 @@ local json = require("json")
 local M = {}
 
 -- Wrap a ToolDef list for use as get_tools() return value.
-function M.build(list) return list end
+-- Validates every ToolDef and FAILS FAST with a clear message — the engine
+-- logs get_tools() errors at startup, so a broken tool is visible immediately
+-- instead of silently misbehaving mid-game:
+--   - duplicate names: the engine map keeps only the last one, silently
+--   - params as Lua table: the engine reads params with get_or<string>,
+--     a table silently becomes "{}" (no parameters visible to the LLM)
+--   - missing fn: the tool gets registered but every call fails
+function M.build(list)
+    local seen   = {}
+    local errors = {}
+    for i, t in ipairs(list or {}) do
+        if type(t) ~= "table" then
+            table.insert(errors, "tool #" .. i .. ": not a table")
+        else
+            local name = t.name
+            if type(name) ~= "string" or name == "" then
+                table.insert(errors, "tool #" .. i .. ": missing or empty 'name'")
+                name = "?"
+            elseif seen[name] then
+                table.insert(errors, "duplicate tool name '" .. name
+                    .. "' (tool #" .. seen[name] .. " and #" .. i
+                    .. ") — the engine would keep only the last one")
+            else
+                seen[name] = i
+            end
+            if type(t.fn) ~= "function" then
+                table.insert(errors, "tool #" .. i .. " ('" .. name
+                    .. "'): 'fn' missing or not a function")
+            end
+            if t.params ~= nil and type(t.params) ~= "string" then
+                table.insert(errors, "tool #" .. i .. " ('" .. name
+                    .. "'): 'params' must be a JSON STRING — a Lua table "
+                    .. "silently becomes '{}' in the engine")
+            end
+        end
+    end
+    if #errors > 0 then
+        error("tools.build: invalid tool definitions:\n  - "
+            .. table.concat(errors, "\n  - "), 2)
+    end
+
+    -- Defensive fn wrapper (single chokepoint for ALL tools). The LLM side is
+    -- unreliable: models send empty/whitespace/malformed `arguments`, and a raw
+    -- json.decode in a tool fn would throw — surfacing a useless Lua error that
+    -- the model just retries, looping. We normalize here so every tool fn runs
+    -- against a valid object string and never crashes the turn:
+    --   • empty / whitespace args        → "{}"  (fn's own missing-arg guidance runs)
+    --   • malformed JSON                  → clear actionable error, fn NOT called
+    --   • fn throws                       → clear error, no loop-inducing raw trace
+    --   • fn returns non-string           → coerced to a JSON string
+    -- Idempotent: a fn already wrapped (double build) is left alone.
+    for _, t in ipairs(list) do
+        if type(t) == "table" and type(t.fn) == "function" and not t._wrapped then
+            local orig, tname = t.fn, t.name or "?"
+            t.fn = function(args_json)
+                if type(args_json) ~= "string" or args_json:match("^%s*$") then
+                    args_json = "{}"
+                end
+                if not pcall(json.decode, args_json) then
+                    return json.encode({ error = "Argomenti JSON non validi per '" .. tname
+                        .. "'. Invia un oggetto JSON valido con i campi richiesti." })
+                end
+                local ok, res = pcall(orig, args_json)
+                if not ok then
+                    return json.encode({ error = "Tool '" .. tname .. "' fallito: "
+                        .. tostring(res) })
+                end
+                if type(res) ~= "string" then
+                    return json.encode(res ~= nil and { ok = true, result = res }
+                                                   or { ok = true })
+                end
+                return res
+            end
+            t._wrapped = true
+        end
+    end
+    return list
+end
 
 -- ---------------------------------------------------------------------------
 -- Dice

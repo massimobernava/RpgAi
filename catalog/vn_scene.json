@@ -1,0 +1,122 @@
+{
+  "backgrounds": [
+    {
+      "file": "asset/vn/bg/cucina_day.png",
+      "hotspots": [
+        {
+          "label": "Frigo",
+          "object": "frigo_cucina",
+          "rect": [
+            0.03999999910593033,
+            0.30000001192092896,
+            0.1599999964237213,
+            0.550000011920929
+          ],
+          "type": "obj"
+        },
+        {
+          "label": "Porta salotto",
+          "location": "salotto",
+          "rect": [
+            0.8839285969734192,
+            0.3841269910335541,
+            0.0892857164144516,
+            0.4253968298435211
+          ],
+          "type": "exit"
+        }
+      ],
+      "id": "cucina_giorno",
+      "tags": [
+        "cucina",
+        "giorno"
+      ]
+    },
+    {
+      "file": "asset/vn/bg/cucina_night.png",
+      "hotspots": [],
+      "id": "cucina_notte",
+      "tags": [
+        "cucina",
+        "notte"
+      ]
+    },
+    {
+      "file": "asset/vn/bg/salotto_day.png",
+      "hotspots": [
+        {
+          "label": "Porta cucina",
+          "location": "cucina",
+          "rect": [
+            0.800000011920929,
+            0.30000001192092896,
+            0.15000000596046448,
+            0.5
+          ],
+          "type": "exit"
+        }
+      ],
+      "id": "salotto_giorno",
+      "tags": [
+        "salotto",
+        "giorno"
+      ]
+    },
+    {
+      "conditions": [],
+      "file": "my_scripts/images/villa_vacanze/bg_villa_a_salotto.jpg",
+      "hotspots": [
+        {
+          "object": "tv_salotto",
+          "rect": [
+            0.05000000074505806,
+            0.39374998211860657,
+            0.2839285731315613,
+            0.12321428209543228
+          ],
+          "type": "obj"
+        },
+        {
+          "location": "",
+          "rect": [
+            0.18214285373687744,
+            0.9388392567634583,
+            0.7089285850524902,
+            0.06160714104771614
+          ],
+          "type": "exit"
+        }
+      ],
+      "id": "villa_a_salotto",
+      "location": "villa_a_salotto",
+      "tags": []
+    }
+  ],
+  "sprites": [
+    {
+      "file": "asset/vn/npc/anna_pigiama.png",
+      "id": "anna_pigiama",
+      "npc": "anna",
+      "tags": [
+        "pigiama",
+        "neutro"
+      ]
+    },
+    {
+      "file": "asset/vn/npc/anna_completo.png",
+      "id": "anna_completo",
+      "npc": "anna",
+      "tags": [
+        "completo",
+        "neutro"
+      ]
+    },
+    {
+      "conditions": [],
+      "file": "my_scripts/images/villa_vacanze/npc_rossana.jpg",
+      "id": "rossana_1",
+      "npc": "rossana",
+      "tags": []
+    }
+  ]
+}
