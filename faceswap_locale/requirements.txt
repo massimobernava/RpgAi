@@ -1,0 +1,55 @@
+# RpgAi faceswap_locale — face swap + detection + identity + upscaling server
+# Python 3.10+ required.
+#
+# Setup:
+#   cd faceswap_locale
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# Models (place in faceswap_locale/models/):
+#   inswapper_128.onnx     — required for /swap
+#     https://huggingface.co/deepinsight/inswapper/resolve/main/inswapper_128.onnx
+#   GFPGANv1.4.pth         — optional, enables enhance=true in /swap
+#     https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth
+#   RealESRGAN_x4plus.pth  — optional, enables /upscale with Real-ESRGAN
+#     https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth
+#
+# InsightFace buffalo_l downloads automatically to ~/.insightface/models/ on first run.
+#
+# On Linux with CUDA install torch manually first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Core
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+pillow>=10.3.0
+numpy>=1.26.0
+opencv-python-headless>=4.9.0
+
+# Face analysis + swap
+insightface>=0.7.3
+onnxruntime>=1.17.0
+
+# Optional — CLIPSeg text-guided segmentation (/segment --text "mouth,hair")
+# Auto-downloads ~400MB model from HuggingFace.
+# Requires torch first:
+#   pip install torch torchvision
+#   pip install transformers
+#
+# Occluder — detects hands/objects blocking the face (/segment --occlude)
+# curl -L -o faceswap_locale/models/occluder.onnx \
+#   https://github.com/visomaster/visomaster-assets/releases/download/v0.1.0/occluder.onnx
+#
+# FaceParser ResNet34 — primary parts segmentation, NO torch needed (onnxruntime only)
+# Download faceparser_resnet34.onnx from VisoMaster-Fusion releases and place in models/
+# Parts: face, skin, brow, left_brow, right_brow, eye, left_eye, right_eye,
+#        glasses, ear, left_ear, right_ear, ear_ring, nose,
+#        mouth, inner_mouth, upper_lip, lower_lip, lips, neck, hair, hat
+#
+# BiSeNet — fallback if faceparser_resnet34.onnx not present (requires torch + facexlib)
+#   pip install facexlib gfpgan
+
+# Optional — Real-ESRGAN upscaling (/upscale)
+# pip install realesrgan basicsr
