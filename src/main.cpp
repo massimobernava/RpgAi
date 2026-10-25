@@ -23,7 +23,15 @@
 #include <thread>
 #include <csignal>
 #include <atomic>
-#include <glob.h>
+#ifndef _WIN32
+#include <glob.h>   // POSIX glob(); MinGW lacks it — win_expand_pattern() below covers _WIN32
+#endif
+
+// ollama.hpp pulls in winsock2.h → windows.h, which defines ERROR as 0.
+// The engine uses ERROR as an enum member name (LlmJob/ImageJob::State).
+#ifdef ERROR
+#undef ERROR
+#endif
 
 using nlohmann::json;
 
@@ -1364,6 +1372,237 @@ AIProvider provider_from_string(const std::string& s) {
     if (s == "openrouter") return AIProvider::OPENROUTER;
     return AIProvider::OLLAMA;
 }
+
+// ---------------------------------------------------------------------------
+// glob() substitute for Windows (MinGW has no <glob.h>). Used by the CoderAI
+// list_files tool. Expands "dir/sub/*.lua"-style patterns segment by segment;
+// * and ? wildcards are supported in any segment, like glob().
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+static bool glob_pat_match(const std::string& pat, const std::string& s) {
+    size_t p = 0, s0 = 0, star = std::string::npos, mark = 0;
+    while (s0 < s.size()) {
+        if (p < pat.size() && (pat[p] == '?' || pat[p] == s[s0])) { ++p; ++s0; }
+        else if (p < pat.size() && pat[p] == '*')                 { star = p++; mark = s0; }
+        else if (star != std::string::npos)                       { p = star + 1; s0 = ++mark; }
+        else return false;
+    }
+    while (p < pat.size() && pat[p] == '*') ++p;
+    return p == pat.size();
+}
+
+static std::vector<std::string> win_expand_pattern(const std::string& pat) {
+    namespace fs = std::filesystem;
+    std::vector<std::string> cur{""};
+    std::string rest = pat;
+    while (!rest.empty()) {
+        size_t slash = rest.find('/');
+        std::string seg  = (slash == std::string::npos) ? rest : rest.substr(0, slash);
+        rest = (slash == std::string::npos) ? "" : rest.substr(slash + 1);
+        std::vector<std::string> next;
+        if (seg.find_first_of("*?") != std::string::npos) {
+            for (const auto& base : cur) {
+                std::error_code ec;
+                for (auto& e : fs::directory_iterator(base.empty() ? "." : base,
+                                                     fs::directory_options::skip_permission_denied, ec)) {
+                    if (!glob_pat_match(seg, e.path().filename().string())) continue;
+                    next.push_back(base.empty() ? e.path().filename().string()
+                                                : base + "/" + e.path().filename().string());
+                }
+            }
+        } else {
+            // Literal segment: keep it even if missing — a later wildcard
+            // segment then yields nothing, mirroring glob() on a bad path.
+            for (const auto& base : cur)
+                next.push_back(base.empty() ? seg : base + "/" + seg);
+        }
+        cur = std::move(next);
+        if (cur.empty()) break;
+    }
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (auto& p : cur)
+        if (fs::exists(fs::u8path(p), ec)) out.push_back(p);
+    return out;
+}
+
+// grep -rn substitute for Windows: recursive substring search under `roots`,
+// formatted as "path:line:text" like grep, capped at max_results matches.
+// Used by the CoderAI find_definition/find_usages tools (POSIX shells out to
+// grep + head instead). Only small, known-text-extension files are scanned.
+static std::string win_grep_search(const std::string& needle,
+                                   const std::vector<std::string>& roots,
+                                   size_t max_results = 30) {
+    namespace fs = std::filesystem;
+    static const std::set<std::string> text_ext{
+        ".lua", ".h", ".hpp", ".cpp", ".c", ".cc", ".md", ".txt",
+        ".json", ".js", ".css", ".html", ".py", ".sh", ".xml", ".csv"};
+    std::string out;
+    size_t count = 0;
+    std::error_code ec;
+    for (const auto& root : roots) {
+        if (!fs::exists(root, ec)) continue;
+        fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+        for (; it != end && count < max_results; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            std::string ext = it->path().extension().string();
+            if (!text_ext.count(ext))       continue;
+            if (it->file_size(ec) > 1024*1024) continue;
+            std::ifstream f(it->path());
+            if (!f.good()) continue;
+            std::string line;
+            size_t lineno = 0;
+            while (std::getline(f, line) && count < max_results) {
+                ++lineno;
+                if (line.find(needle) == std::string::npos) continue;
+                if (line.size() > 300) line = line.substr(0, 300) + "...";
+                out += it->path().generic_string() + ":" + std::to_string(lineno) + ":" + line + "\n";
+                ++count;
+            }
+        }
+    }
+    return out;
+}
+
+// ---- Helpers for /api/servers/action on Windows --------------------------------
+// The POSIX implementation shells out to bash/nohup/pkill; on Windows we spawn
+// detached processes directly (CreateProcess, log redirected to a file) and
+// terminate them via PowerShell/CIM, which ships with Windows 10+.
+
+// UTF-8 (engine strings) -> UTF-16 (Win32 APIs)
+static std::wstring win_widen(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    std::wstring out((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), n);
+    return out;
+}
+
+// UTF-16 (Win32 APIs) -> UTF-8 (engine strings)
+static std::string win_narrow(const std::wstring& s) {
+    if (s.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0, nullptr, nullptr);
+    std::string out((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), n, nullptr, nullptr);
+    return out;
+}
+
+// Locate a working system Python, preferring the real interpreter over
+// launcher shims:
+//  1) ask the py launcher for its resolved sys.executable (a direct child —
+//     reliable stdout inheritance for our log redirection);
+//  2) walk PATH for the first python.exe outside WindowsApps (the Store stub
+//     exits silently without running anything);
+//  3) give up and return "python" as-is.
+static std::string win_find_python() {
+    wchar_t buf[MAX_PATH];
+    DWORD n = SearchPathW(nullptr, L"py.exe", nullptr, MAX_PATH, buf, nullptr);
+    if (n > 0 && n < MAX_PATH) {
+        // Ask the launcher for its resolved interpreter via a probe script.
+        // (A -c "..." one-liner is unreliable: cmd /c mangles nested quotes.)
+        std::error_code ec;
+        auto tmp = std::filesystem::temp_directory_path(ec);
+        if (!ec) {
+            auto probe = tmp / "rpgai_probe_pyexe.py";
+            { std::ofstream f(probe); f << "import sys;print(sys.executable)\n"; }
+            FILE* p = _popen(("py.exe \"" + probe.string() + "\"").c_str(), "r");
+            if (p) {
+                char line[1024] = {0};
+                std::string out;
+                while (fgets(line, sizeof(line), p)) out += line;
+                _pclose(p);
+                size_t b = out.find_first_not_of(" \t\r\n"), e = out.find_last_not_of(" \t\r\n");
+                if (b != std::string::npos) {
+                    std::string exe = out.substr(b, e - b + 1);
+                    if (exe.size() > 4 && std::filesystem::exists(exe, ec)) return exe;
+                }
+            }
+        }
+    }
+    if (const char* path_env = std::getenv("PATH")) {
+        std::stringstream ss(path_env);
+        std::string dir;
+        while (std::getline(ss, dir, ';')) {
+            if (dir.empty()) continue;
+            std::string cand = dir + "\\python.exe";
+            std::error_code ec;
+            if (!std::filesystem::exists(cand, ec)) continue;
+            std::string low = cand;
+            std::transform(low.begin(), low.end(), low.begin(),
+                           [](unsigned char c){ return (char)std::tolower(c); });
+            if (low.find("windowsapps") != std::string::npos) continue;  // Store stub
+            // PyManager layout: bin\python.exe is a launcher that drops the
+            // stdio of a detached parent — spawn the bundled pythoncore exe.
+            auto base = std::filesystem::path(cand).parent_path().parent_path();
+            for (auto it = std::filesystem::directory_iterator(base, ec);
+                 !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+                std::string fn = it->path().filename().string();
+                if (it->is_directory(ec) && fn.rfind("pythoncore", 0) == 0) {
+                    std::string real = (it->path() / "python.exe").string();
+                    if (std::filesystem::exists(real, ec)) return real;
+                }
+            }
+            return cand;
+        }
+    }
+    return "python";   // last resort (possibly the stub — nothing better found)
+}
+
+// Spawn a detached child with stdout/stderr redirected to log_file (CREATE_ALWAYS).
+// The image is searched on PATH when command_line's first token has no path.
+static bool win_spawn_detached(const std::string& command_line,
+                               const std::string& working_dir,
+                               const std::string& log_file) {
+    // Handles passed via STARTUPINFO MUST be inheritable (bInheritHandle),
+    // otherwise the child is spawned with broken std handles and the log
+    // stays empty while the process appears to run fine.
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength        = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE log = CreateFileW(win_widen(log_file).c_str(),
+                             GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log == INVALID_HANDLE_VALUE) return false;
+    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = (nul != INVALID_HANDLE_VALUE) ? nul : GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = log;
+    si.hStdError  = log;
+
+    std::wstring cmd = win_widen(command_line);
+    std::wstring cwd = win_widen(working_dir);
+    PROCESS_INFORMATION pi{};
+    BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+                             nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+    if (ok) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    CloseHandle(log);
+    return ok == TRUE;
+}
+
+// pkill -f <pattern>: terminate processes whose command line contains the
+// pattern. Both the pattern and each candidate command line are slash-
+// normalized before matching. Restricted to python-ish image names so the
+// engine itself is never in the crossfire. Uses CIM (Windows 10+).
+static bool win_pkill_f(const std::string& pattern) {
+    std::string pat = pattern;
+    for (auto& c : pat) if (c == '\\') c = '/';
+    std::string safe; for (char c : pat) if (c != '\'') safe += c;   // PS string hygiene
+    std::string ps =
+        "powershell -NoProfile -NonInteractive -Command \""
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.CommandLine -and "
+        "($_.CommandLine -replace '\\\\','/') -like '*" + safe + "*' -and "
+        "$_.Name -match 'python|uv' } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }\"";
+    return std::system(ps.c_str()) == 0;
+}
+#endif
 
 // ===========================================================================
 // CLI
@@ -5902,26 +6141,37 @@ sol::table result = f_result;
                     return "./";
                 }();
 
+                // Log destination: /tmp on POSIX, %TEMP% on Windows (same role).
+                auto log_path_for = [](const char* name) -> std::string {
+#ifdef _WIN32
+                    std::error_code ec;
+                    auto tmp = std::filesystem::temp_directory_path(ec);
+                    return (ec ? std::string(".") : tmp.string()) + "\\rpgai_" + name + ".log";
+#else
+                    return std::string("/tmp/rpgai_") + name + ".log";
+#endif
+                };
+
                 std::string script_path, log_file, pip_deps;
                 if (server == "faceswap_locale") {
                     script_path = srv_base + "faceswap_locale/server.py";
-                    log_file    = "/tmp/rpgai_faceswap_locale.log";
+                    log_file    = log_path_for("faceswap_locale");
                     pip_deps    = "insightface onnxruntime fastapi uvicorn python-multipart pillow numpy opencv-python-headless";
                 } else if (server == "qwen_locale") {
                     script_path = srv_base + "qwen_locale/server_locale.py";
-                    log_file    = "/tmp/rpgai_qwen.log";
+                    log_file    = log_path_for("qwen");
                     pip_deps    = "diffusers torch transformers accelerate peft bitsandbytes huggingface_hub fastapi uvicorn pillow python-multipart";
                 } else if (server == "t2i_locale") {
                     script_path = srv_base + "t2i_locale/server.py";
-                    log_file    = "/tmp/rpgai_t2i.log";
+                    log_file    = log_path_for("t2i");
                     pip_deps    = "diffusers torch transformers accelerate fastapi uvicorn pillow pydantic";
                 } else if (server == "rembg_locale") {
                     script_path = srv_base + "rembg_locale/server.py";
-                    log_file    = "/tmp/rpgai_rembg.log";
+                    log_file    = log_path_for("rembg");
                     pip_deps    = "transparent-background fastapi uvicorn python-multipart pillow numpy";
                 } else if (server == "tts_locale") {
                     script_path = srv_base + "tts_locale/server.py";
-                    log_file    = "/tmp/rpgai_tts.log";
+                    log_file    = log_path_for("tts");
                     // transformers pinned <4.37: BeamSearchScorer removed from public API in 4.37+.
                     // After install, run tts_locale/patch_tts_compat.py to fix torch.load weights_only
                     // and BeamSearchScorer import — Coqui TTS is unmaintained and incompatible with
@@ -5937,22 +6187,42 @@ sol::table result = f_result;
 
                 // Build python/pip invocation from configured environment.
                 auto py_cmd = [&]() -> std::string {
+#ifdef _WIN32
+                    if (reqEnvType == "venv")  return reqEnvPath + "/Scripts/python.exe";
+#else
                     if (reqEnvType == "venv")  return reqEnvPath + "/bin/python3";
+#endif
                     if (reqEnvType == "conda") {
                         std::string env = reqEnvPath.empty() ? "rpgai" : reqEnvPath;
                         return "conda run -n " + env + " python";
                     }
                     if (reqEnvType == "uv")    return "uv run python";
+#ifdef _WIN32
+                    return win_find_python();
+#else
                     return "python3";
+#endif
                 };
                 auto pip_cmd = [&]() -> std::string {
+#ifdef _WIN32
+                    if (reqEnvType == "venv")  return "\"" + reqEnvPath + "/Scripts/python.exe\" -m pip";
+#else
                     if (reqEnvType == "venv")  return reqEnvPath + "/bin/pip";
+#endif
                     if (reqEnvType == "conda") {
                         std::string env = reqEnvPath.empty() ? "rpgai" : reqEnvPath;
+#ifdef _WIN32
+                        return "conda run -n " + env + " python -m pip";
+#else
                         return "conda run -n " + env + " pip";
+#endif
                     }
                     if (reqEnvType == "uv")    return "uv pip";
+#ifdef _WIN32
+                    return "\"" + win_find_python() + "\" -m pip";
+#else
                     return "pip3";
+#endif
                 };
                 // On Linux, system Python is often "externally managed" — pass the override flag.
                 auto pip_install_flags = [&]() -> std::string {
@@ -5974,18 +6244,56 @@ sol::table result = f_result;
                         extra_args.erase(std::remove(extra_args.begin(), extra_args.end(), c), extra_args.end());
 
                     std::string srv_dir = fs::path(script_path).parent_path().string();
-                    std::string srv_script = fs::path(script_path).filename().string();
                     std::string args_part = extra_args.empty() ? "" : " " + extra_args;
+#ifdef _WIN32
+                    // Spawn python directly (no shell): interpreter searched on
+                    // PATH unless venv gave an explicit exe; script as absolute
+                    // path; cwd and log redirection passed to CreateProcess.
+                    std::error_code ec;
+                    std::string abs_script = fs::absolute(fs::path(script_path), ec).string();
+                    std::string interp = py_cmd();
+                    if (interp.find(' ') == std::string::npos) interp = "\"" + interp + "\"";
+                    bool ok = !abs_script.empty()
+                        && win_spawn_detached(interp + " \"" + abs_script + "\"" + args_part,
+                                              srv_dir, log_file);
+                    result["success"] = ok;
+                    result["message"]  = ok ? "Starting " + server + " — log: " + log_file
+                                            : "Failed to start " + server + " (CreateProcess failed — check the Python environment)";
+#else
+                    std::string srv_script = fs::path(script_path).filename().string();
                     std::string cmd = "nohup bash -c 'cd \"" + srv_dir + "\" && " + py_cmd() + " " + srv_script + args_part + "' > " + log_file + " 2>&1 &";
                     system(cmd.c_str());
                     result["success"] = true;
                     result["message"] = "Starting " + server + " — log: " + log_file;
+#endif
                 } else if (action == "stop") {
+#ifdef _WIN32
+                    win_pkill_f(script_path);
+#else
                     std::string cmd = "pkill -f '" + script_path + "'";
                     system(cmd.c_str());
+#endif
                     result["success"] = true;
                     result["message"] = "Stop signal sent to " + server;
                 } else if (action == "install") {
+#ifdef _WIN32
+                    // No bash pipeline on Windows: conda create is a no-op-style
+                    // guard (fails harmlessly if the env already exists), then
+                    // deps are installed into it. Log redirected to log_file.
+                    bool ok = false;
+                    if (reqEnvType == "conda") {
+                        std::string env = reqEnvPath.empty() ? "rpgai" : reqEnvPath;
+                        win_spawn_detached("conda create -n " + env + " python=3.10 -y", ".", log_file);
+                        ok = win_spawn_detached("conda run -n " + env + " python -m pip install " + pip_deps,
+                                                ".", log_file);
+                    } else {
+                        ok = win_spawn_detached(pip_cmd() + " install " + pip_deps + pip_install_flags,
+                                                ".", log_file);
+                    }
+                    result["success"] = ok;
+                    result["message"]  = ok ? "Installing " + server + " deps — log: " + log_file
+                                            : "Failed to launch installer (check the Python environment)";
+#else
                     std::string cmd;
                     if (reqEnvType == "conda") {
                         std::string env = reqEnvPath.empty() ? "rpgai" : reqEnvPath;
@@ -5997,6 +6305,7 @@ sol::table result = f_result;
                     system(cmd.c_str());
                     result["success"] = true;
                     result["message"] = "Installing " + server + " deps — log: " + log_file;
+#endif
                 } else {
                     result["success"] = false;
                     result["error"]   = "Unknown action: " + action;
@@ -6776,12 +7085,19 @@ sol::table result = f_result;
                 std::string pat = a.value("pattern","");
                 if (pat.find("..") != std::string::npos)
                     return json{{"error","pattern not allowed"}}.dump();
-                glob_t gl{}; int r = glob(pat.c_str(), GLOB_NOSORT, nullptr, &gl);
                 json files = json::array();
+#ifndef _WIN32
+                glob_t gl{}; int r = glob(pat.c_str(), GLOB_NOSORT, nullptr, &gl);
                 if (r == 0)
                     for (size_t i = 0; i < gl.gl_pathc && i < 200; ++i)
                         files.push_back(gl.gl_pathv[i]);
                 globfree(&gl);
+#else
+                for (auto& f : win_expand_pattern(pat)) {
+                    if (files.size() >= 200) break;
+                    files.push_back(f);
+                }
+#endif
                 return json{{"files",files},{"count",(int)files.size()}}.dump();
             }
 
@@ -6790,12 +7106,16 @@ sol::table result = f_result;
                 std::string safe; for (char c : sym) if (isalnum(c)||c=='_'||c=='.') safe+=c;
                 if (safe.empty()) return json{{"error","empty symbol"}}.dump();
                 std::string pat = (name == "find_definition") ? ("function " + safe) : safe;
+#ifndef _WIN32
                 std::string cmd = "grep -rn \"" + pat + "\" scripts/ src/ 2>/dev/null | head -30";
                 FILE* p = popen(cmd.c_str(),"r");
                 if (!p) return json{{"error","popen failed"}}.dump();
                 std::string out; char buf[512];
                 while (fgets(buf,sizeof(buf),p)) out += buf;
                 pclose(p);
+#else
+                std::string out = win_grep_search(pat, {"scripts", "src"});
+#endif
                 return json{{"symbol",safe},{"results",out}}.dump();
             }
 
