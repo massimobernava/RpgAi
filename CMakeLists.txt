@@ -117,6 +117,14 @@ target_compile_options(rpgai PRIVATE
     $<$<CONFIG:Debug>:-g -O0>
 )
 
+# GCC >= 15 (e.g. current MSYS2 GCC 16) diagnoses template bodies that older
+# compilers accepted; vendored sol2 v3.3.0 triggers it inside optional<T&>.
+# Without this flag the build fails with "'class sol::optional<T&>' has no
+# member named 'construct' [-Wtemplate-body]". Upgrade sol2 before removing.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15")
+    target_compile_options(rpgai PRIVATE -Wno-template-body)
+endif()
+
 install(TARGETS rpgai RUNTIME DESTINATION bin)
 
 # ===========================================================================
