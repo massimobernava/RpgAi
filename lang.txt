@@ -10,3 +10,4 @@ es: Responde siempre en español, independientemente del idioma del texto del ju
 pt: Responde sempre em português, independentemente do idioma do texto do jogo.
 ja: ゲームテキストの言語に関わらず、常に日本語で返答してください。
 zh: 无论游戏文本使用何种语言，请始终用中文回答。
+ru: Отвечай всегда на русском языке, независимо от языка игрового текста.

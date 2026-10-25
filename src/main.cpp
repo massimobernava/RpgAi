@@ -397,6 +397,7 @@ std::string& openrouter_app_title= cfg.openrouter_app_title;
 
 // forward-declared here; defined after parse_args
 AIProvider provider_from_string(const std::string& s);
+static std::string load_lang_instruction(const std::string& code, const std::string& lang_file);
 
 // ===========================================================================
 // Settings — file persistence
@@ -548,6 +549,9 @@ static void apply_settings_json(const json& j) {
     gs("embed_url",       cfg.embedUrl);
     gs("embed_key",       cfg.embedKey);
     gs("lang_code",       cfg.langCode);
+    if (j.contains("lang_code"))   // reload instruction so the Settings change applies live
+        cfg.langInstruction = cfg.langCode.empty() ? std::string{}
+                                                   : load_lang_instruction(cfg.langCode, cfg.langFile);
     gs("gen_model",        cfg.genModel);
     gs("gen_provider",     cfg.genProvider);
     gs("agent_model",      cfg.agentModel);
