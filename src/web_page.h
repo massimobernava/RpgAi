@@ -2300,7 +2300,7 @@ async function loadSettings() {
     sv('s-coder-model',      d.coder_model);
     sv('s-coder-provider',   d.coder_provider);
     const cml = document.getElementById('coder-model-label');
-    if (cml) cml.textContent = (d.coder_provider || '?') + ' · ' + (d.coder_model || '?');
+    if (cml) cml.textContent = (d.coder_provider || 'main') + ' · ' + (d.coder_model || 'main model');
 
     const imgPv = d.img_enabled ? (d.img_provider || '') : '';
     sv('s-img-provider',     imgPv);

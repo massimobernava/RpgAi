@@ -557,26 +557,21 @@ static void apply_settings_json(const json& j) {
     std::string cprov;
     gs("coder_provider", cprov);
     if (j.contains("coder_provider")) {
-        if (!cprov.empty()) {
-            cfg.coderProviderName = cprov;
-            cfg.coderProvider     = provider_from_string(cprov);
-        } else {
-            // empty = inherit main (keeps name and enum consistent at runtime)
-            cfg.coderProviderName = cfg.providerName;
-            cfg.coderProvider     = cfg.provider;
-        }
+        // Stored verbatim: empty = "(main)" and resolved lazily via coder_eff_*()
+        cfg.coderProviderName = cprov;
+        cfg.coderProvider     = cprov.empty() ? cfg.provider : provider_from_string(cprov);
     }
-    gs("coder_model", cfg.coderModel);
-    if (j.contains("coder_model") && cfg.coderModel.empty())
-        cfg.coderModel = cfg.activeModel();
+    gs("coder_model", cfg.coderModel);   // empty = inherit main model
     gs("coder_key",   cfg.coderKey);
     std::string cvprov;
     gs("coder_vision_provider", cvprov);
-    if (j.contains("coder_vision_provider") && !cvprov.empty()) {
+    if (j.contains("coder_vision_provider")) {
+        // empty = inherit coder provider
         cfg.coderVisionProviderName = cvprov;
-        cfg.coderVisionProvider     = provider_from_string(cvprov);
+        cfg.coderVisionProvider     = cvprov.empty() ? cfg.coderProvider
+                                                     : provider_from_string(cvprov);
     }
-    gs("coder_vision_model", cfg.coderVisionModel);
+    gs("coder_vision_model", cfg.coderVisionModel);  // empty = inherit coder model
     // If the user saves the default persona unchanged, store it as-is (harmless);
     // build_coder_system_prompt falls back to DEFAULT when empty either way.
     gs("coder_persona", cfg.coderPersona);
@@ -1365,6 +1360,31 @@ AIProvider provider_from_string(const std::string& s) {
     return AIProvider::OLLAMA;
 }
 
+// Effective CoderAI provider/model. The stored config fields stay EMPTY when
+// the user picks "(main)" in Settings, so the UI can round-trip the choice;
+// the inheritance is resolved HERE at use time, which also lets live edits to
+// the main provider/model propagate to CoderAI without a restart.
+static std::string coder_eff_provider_name() {
+    return cfg.coderProviderName.empty() ? cfg.providerName : cfg.coderProviderName;
+}
+static AIProvider coder_eff_provider() {
+    return cfg.coderProviderName.empty() ? cfg.provider : cfg.coderProvider;
+}
+static std::string coder_eff_model() {
+    return cfg.coderModel.empty() ? cfg.activeModel() : cfg.coderModel;
+}
+static std::string coder_eff_vision_provider_name() {
+    return cfg.coderVisionProviderName.empty() ? coder_eff_provider_name()
+                                               : cfg.coderVisionProviderName;
+}
+static AIProvider coder_eff_vision_provider() {
+    return cfg.coderVisionProviderName.empty() ? coder_eff_provider()
+                                               : cfg.coderVisionProvider;
+}
+static std::string coder_eff_vision_model() {
+    return cfg.coderVisionModel.empty() ? coder_eff_model() : cfg.coderVisionModel;
+}
+
 // ===========================================================================
 // CLI
 // ===========================================================================
@@ -1571,26 +1591,13 @@ int main(int argc, char* argv[]) {
                           "' not found in " + cfg.langFile + " — no injection applied.");
     }
 
-    // CoderAI defaults — inherit main provider/model if not overridden
-    if (cfg.coderProviderName.empty()) {
-        cfg.coderProvider     = cfg.provider;
-        cfg.coderProviderName = cfg.providerName;
-    }
-    if (cfg.coderModel.empty())
-        cfg.coderModel = cfg.activeModel();
-    // Vision model — defaults to coder model/provider if not explicitly set
-    if (cfg.coderVisionProviderName.empty()) {
-        cfg.coderVisionProvider     = cfg.coderProvider;
-        cfg.coderVisionProviderName = cfg.coderProviderName;
-    }
-    if (cfg.coderVisionModel.empty())
-        cfg.coderVisionModel = cfg.coderModel;
-
+    // CoderAI "empty = inherit" is resolved lazily at use (coder_eff_*()), so
+    // live Settings edits propagate; print the effective values for clarity.
     print_system("RpgAi Engine starting...");
     print_system("Provider:   " + cfg.providerName + " | Model: " + active_model);
-    print_system("CoderAI:    " + cfg.coderProviderName + " | Model: " + cfg.coderModel);
-    if (cfg.coderVisionModel != cfg.coderModel)
-        print_system("CoderVision:" + cfg.coderVisionProviderName + " | Model: " + cfg.coderVisionModel);
+    print_system("CoderAI:    " + coder_eff_provider_name() + " | Model: " + coder_eff_model());
+    if (cfg.coderVisionModel != cfg.coderModel || cfg.coderVisionProviderName != cfg.coderProviderName)
+        print_system("CoderVision:" + coder_eff_vision_provider_name() + " | Model: " + coder_eff_vision_model());
     print_system("Script:     " + cfg.basePath + cfg.script);
     print_system("Save mode:  " + save_mode_str + " → " + cfg.saveFile);
     if (!cfg.langInstruction.empty())
@@ -6553,8 +6560,8 @@ sol::table result = f_result;
             std::string b64 = bytes_to_base64(img_bytes);
             std::string q = question.empty() ? "Describe this image in detail." : question;
             // Use dedicated vision model/provider if set, else fall back to coder model
-            AIProvider prov  = cfg.coderVisionProvider;
-            std::string model = cfg.coderVisionModel.empty() ? cfg.activeModel() : cfg.coderVisionModel;
+            AIProvider  prov  = coder_eff_vision_provider();
+            std::string model = coder_eff_vision_model();
             std::string key   = cfg.coderKey;
 
             if (prov == AIProvider::OPENROUTER || prov == AIProvider::OPENAI) {
@@ -6622,8 +6629,8 @@ sol::table result = f_result;
                                          const std::string& mime_type,
                                          const std::string& query) -> std::string {
             std::string b64   = bytes_to_base64(img_bytes);
-            AIProvider  prov  = cfg.coderVisionProvider;
-            std::string model = cfg.coderVisionModel.empty() ? cfg.activeModel() : cfg.coderVisionModel;
+            AIProvider  prov  = coder_eff_vision_provider();
+            std::string model = coder_eff_vision_model();
             std::string key   = cfg.coderKey;
 
             // JSON schema for grounding output
@@ -9243,8 +9250,8 @@ sol::table result = f_result;
                 }
                 // ── end @mention expansion ───────────────────────────────────────
 
-                AIProvider  use_provider = cfg.coderProvider;
-                std::string use_model    = cfg.coderModel;
+                AIProvider  use_provider = coder_eff_provider();
+                std::string use_model    = coder_eff_model();
                 if (!coder_session.provider_override.empty())
                     use_provider = provider_from_string(coder_session.provider_override);
                 if (!coder_session.model_override.empty())
@@ -9299,8 +9306,8 @@ sol::table result = f_result;
 
         // GET /api/coder/capabilities — live tools+vision test on the configured coder model
         CROW_ROUTE(app, "/api/coder/capabilities")([&]() {
-            std::string prov  = cfg.coderProviderName.empty() ? cfg.providerName : cfg.coderProviderName;
-            std::string model = cfg.coderModel.empty()        ? cfg.activeModel()  : cfg.coderModel;
+            std::string prov  = coder_eff_provider_name();
+            std::string model = coder_eff_model();
             std::string key   = cfg.coderKey.empty()          ? cfg.openrouter_key : cfg.coderKey;
             std::string base_url;
             bool is_ollama = (prov == "ollama");
@@ -9450,8 +9457,8 @@ sol::table result = f_result;
             json result = {
                 {"active",           coder_session.active},
                 {"history_length",   (int)coder_session.history.size()},
-                {"provider",         coder_session.provider_override.empty() ? cfg.coderProviderName : coder_session.provider_override},
-                {"model",            coder_session.model_override.empty()    ? cfg.coderModel         : coder_session.model_override},
+                {"provider",         coder_session.provider_override.empty() ? coder_eff_provider_name() : coder_session.provider_override},
+                {"model",            coder_session.model_override.empty()    ? coder_eff_model()         : coder_session.model_override},
                 {"pending_approval", coder_session.pending.has_value()}
             };
             crow::response res(result.dump());
