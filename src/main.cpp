@@ -6802,14 +6802,17 @@ sol::table result = f_result;
             if (name == "check_lua_syntax") {
                 std::string code = a.value("code","");
                 if (code.empty()) return json{{"ok",false},{"error","empty code"}}.dump();
-                std::string tmp = "/tmp/rpgai_coder_" + std::to_string(getpid()) + ".lua";
-                { std::ofstream tf(tmp); tf << code; }
-                FILE* p = popen(("luajit -bl \""+tmp+"\" /dev/null 2>&1").c_str(),"r");
-                std::string out;
-                if (p) { char buf[512]; while (fgets(buf,sizeof(buf),p)) out+=buf; pclose(p); }
-                std::remove(tmp.c_str());
-                bool ok = out.empty() || out.find("error") == std::string::npos;
-                return json{{"ok",ok},{"output",out}}.dump();
+                // Parse in-process with the engine's own linked LuaJIT: no /tmp
+                // file and no external luajit binary (unreliable on Windows).
+                lua_State* L = luaL_newstate();
+                std::string err;
+                int rc = luaL_loadbuffer(L, code.c_str(), code.size(), "@chunk");
+                if (rc != LUA_OK) {
+                    const char* m = lua_tostring(L, -1);
+                    err = m ? m : "syntax error";
+                }
+                lua_close(L);
+                return json{{"ok",rc == LUA_OK},{"output",err}}.dump();
             }
 
             if (name == "read_knowledge") {
