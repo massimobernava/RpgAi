@@ -1386,12 +1386,12 @@ void print_help(const char* progName) {
     opt("--script <file>",        "Lua game script",                         cfg.script);
     opt("--path <dir>",           "Base directory for Lua scripts",          cfg.basePath);
     opt("--load <file>",          "Restore session from file",               "");
-    opt("--save <file>",          "File di output",                          cfg.saveFile);
-    opt("--save-mode <m>",        "last (sovrascrive) | full (appende)",     "last");
+    opt("--save <file>",          "Output file",                             cfg.saveFile);
+    opt("--save-mode <m>",        "last (overwrite) | full (append)",        "last");
     opt("--save-path <dir>",      "Directory for save files",                "(cwd)");
-    opt("--rag <file>",           "JSONL per stile narrativo",               "");
+    opt("--rag <file>",           "JSONL for narrative style",               "");
     opt("--rag-examples <n>",     "RAG examples per turn",                   std::to_string(cfg.ragExamples));
-    opt("--max-history <n>",      "Max messaggi nel contesto LLM",           std::to_string(cfg.maxHistory));
+    opt("--max-history <n>",      "Max messages in the LLM context",         std::to_string(cfg.maxHistory));
     opt("--max-retries <n>",      "Max retries per turn",                    std::to_string(cfg.maxRetries));
     opt("--lang <code>",          "Language code (e.g. it, fr, de). Injects",  "");
     opt("",                       "  a language instruction into every LLM call", "");
@@ -1405,8 +1405,8 @@ void print_help(const char* progName) {
     opt("--asset-root <path>",    "Base dir for asset/ & catalog/ (abs paths)", "cwd");
     print_image_help();
     std::cout << "\nEMBEDDING OPTIONS\n";
-    opt("--embed-provider <n>",   "ollama|openai (default: segue --provider)", "");
-    opt("--embed-model <n>",      "Modello embedding (attiva calcolo vettori)", "");
+    opt("--embed-provider <n>",   "ollama|openai (default: follows --provider)", "");
+    opt("--embed-model <n>",      "Embedding model (enables vector computation)", "");
     opt("--embed-url <url>",      "Override base URL per embedding",         "");
     opt("--embed-key <key>",      "API key per endpoint embedding",          "");
     std::cout << "\nOLLAMA\n";
@@ -1429,7 +1429,7 @@ void print_help(const char* progName) {
     opt("--coder-model <n>",      "Model for CoderAI  (default: inherits --model)",      "");
     opt("--coder-key <key>",      "API key override for CoderAI",                        "");
     opt("--coder-path <dir>",     "Knowledge base dir  (default: <--path>/coder_knowledge/)", "");
-    opt("--coder-persona <text>", "CoderAI personality/identity (default: built-in; editable in Preferenze)", "");
+    opt("--coder-persona <text>", "CoderAI personality/identity (default: built-in; editable in Settings)", "");
     std::cout << "\nMODEL TIERS (optional per-role defaults, read by Lua libs via get_tier)\n";
     opt("--gen-model <m>",        "Entity generation model (persona/world)", "main model");
     opt("--gen-provider <p>",     "Entity generation provider", "main provider");
@@ -1439,9 +1439,9 @@ void print_help(const char* progName) {
     opt("--ambient-provider <p>", "Ambient NPC-NPC events provider", "main provider");
     std::cout << "\nIN-GAME BUILT-IN COMMANDS\n"
               << "  /save                 Save session\n"
-              << "  /status               Stampa stato grezzo JSON\n"
-              << "  /quit  /q             Esci\n"
-              << "  /help                 Questo help\n"
+              << "  /status               Print raw JSON state\n"
+              << "  /quit  /q             Quit\n"
+              << "  /help                 This help\n"
               << "  /summary [N]          Summarise and compress history\n"
               << "                        N = recent turns to keep after summary (default 2)\n"
               << "  /fix <instruction>    Rewrite the last scene with a correction\n"
@@ -5190,7 +5190,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_npcs"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile (manca adv.enable_editors)"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available (missing adv.enable_editors)"; }
             else {
                 try {
                     sol::protected_function_result r = pf();
@@ -5208,7 +5208,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_npc_get"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     sol::protected_function_result r = pf(npc_id);
@@ -5227,7 +5227,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_npc_patch"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     // pass the body straight through as the patch JSON string
@@ -5248,7 +5248,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_npc_create"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     auto body = json::parse(req.body.empty() ? "{}" : req.body);
@@ -5270,7 +5270,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_locations"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     sol::protected_function_result r = pf();
@@ -5288,7 +5288,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_location_get"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     sol::protected_function_result r = pf(loc_id);
@@ -5306,7 +5306,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_location_patch"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     std::string patch = req.body.empty() ? "{}" : req.body;
@@ -5325,7 +5325,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_location_create"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     auto body = json::parse(req.body.empty() ? "{}" : req.body);
@@ -5347,7 +5347,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_objects"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile (world.lua non caricato?)"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available (world.lua not loaded?)"; }
             else {
                 try {
                     sol::protected_function_result r = pf();
@@ -5365,7 +5365,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_object_get"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     sol::protected_function_result r = pf(obj_id);
@@ -5383,7 +5383,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_object_patch"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     auto patch = json::parse(req.body.empty() ? "{}" : req.body);
@@ -5402,7 +5402,7 @@ sol::table result = f_result;
             std::lock_guard<std::mutex> lock(lua_mutex);
             json result;
             sol::protected_function pf = lua["editor_object_create"];
-            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor non disponibile"; }
+            if (!pf.valid()) { result["ok"] = false; result["error"] = "editor not available"; }
             else {
                 try {
                     auto body = json::parse(req.body.empty() ? "{}" : req.body);
@@ -5431,12 +5431,12 @@ sol::table result = f_result;
                 auto body = json::parse(req.body.empty() ? "{}" : req.body);
                 std::string mode = body.value("mode", "vn");
                 if (mode != "vn") {
-                    result["ok"] = false; result["error"] = "scaffold supporta solo mode=vn";
+                    result["ok"] = false; result["error"] = "scaffold only supports mode=vn";
                 } else {
                     sol::object sf = lua["scaffold_vn"];
                     if (!sf.valid() || sf.get_type() != sol::type::function) {
                         result["ok"] = false;
-                        result["error"] = "scaffold non disponibile: avvia e inizializza un'avventura basata su adventure.lua";
+                        result["error"] = "scaffold not available: start and initialize an adventure.lua-based adventure first";
                     } else {
                         // Ensure catalog/ dir + an empty vn_scene.json skeleton.
                         std::string path = vn_catalog_file();
@@ -8733,7 +8733,7 @@ sol::table result = f_result;
                 "- When asked to place/paste/composite an asset onto a background: call composite_image. The asset must be a PNG with transparent background (RGBA). Typical pipeline: ground_image → crop_image → remove_background → composite_image → edit_image.\n"
                 "- When asked to remove the background from an image (for VN sprites, cut-outs): call remove_background (port 8005, rembg_locale). If the tool returns a connection error, tell the user to start rembg_locale: cd rembg_locale && ./start.sh\n"
                 "- NPC VN sprite pipeline: generate_portrait → remove_background(output: asset/vn/npc/<id>.png) → add to catalog via VN Editor.\n"
-                "- To create a face reference from an existing image ('memorizza il volto come X'): ground_image to find face bbox → crop_image to extract → t2i_reference(add, char_id=X) → t2i_reference(build, char_id=X). Then use generate_portrait(char_id=X) or generate_scene(chars=[X,...]) to generate with that face.\n"
+                "- To create a face reference from an existing image ('store the face as X'): ground_image to find face bbox → crop_image to extract → t2i_reference(add, char_id=X) → t2i_reference(build, char_id=X). Then use generate_portrait(char_id=X) or generate_scene(chars=[X,...]) to generate with that face.\n"
                 "- generate_portrait / generate_scene require --img-url pointing to t2i_locale server. If the tool returns 't2i server URL not configured', inform the user to add --img-url to their launch command.\n"
                 "- faceswap=true in generate_portrait/scene uses hard face replacement (best for photorealistic consistency); omit or faceswap=false uses soft IP-Adapter conditioning (better for stylized results).\n"
                 "- edit_image / generate_image: ALWAYS write the prompt/instruction in English — image models do not understand other languages\n"
@@ -8874,7 +8874,7 @@ sol::table result = f_result;
                         "Schema (sprites):     {id, npc, file, tags, conditions:[{outfit}|{stat,min,max}|{flag}]}\n"
                         "Schema (verb_options): {\"esamina\":[\"vestiti\",\"espressione\"], \"chiedi\":[\"nome\"]} — per-verb L2 sub-options shown in the GUI verb coin\n"
                         "NPC persona files carry vn_verbs (L1 verbs) and topics (L2 for 'parla').\n"
-                        "After editing the catalog tell the user to press 'Ricarica' in the VN window.\n"
+                        "After editing the catalog tell the user to press 'Reload' in the VN window.\n"
                         "Inline image preview: write any local .png/.jpg path in your reply and the GUI will render it automatically.\n";
                 }
             }
@@ -9162,11 +9162,11 @@ sol::table result = f_result;
                 // Expanded server-side; CoderAI sees the content, not the tag.
                 auto read_last_lines = [](const std::string& path, int n) -> std::string {
                     std::ifstream f(path);
-                    if (!f.good()) return "(log non trovato: " + path + ")";
+                    if (!f.good()) return "(log not found: " + path + ")";
                     std::vector<std::string> lines;
                     std::string line;
                     while (std::getline(f, line)) lines.push_back(line);
-                    if (lines.empty()) return "(log vuoto)";
+                    if (lines.empty()) return "(empty log)";
                     int start = std::max(0, (int)lines.size() - n);
                     std::string out;
                     for (int i = start; i < (int)lines.size(); ++i)
@@ -9178,7 +9178,7 @@ sol::table result = f_result;
                     const std::string tag = "@state";
                     size_t pos;
                     while ((pos = user_msg.find(tag)) != std::string::npos) {
-                        std::string exp = "[STATO NON DISPONIBILE (sessione non attiva)]";
+                        std::string exp = "[STATE NOT AVAILABLE (session not active)]";
                         if (session_state == SessionState::PLAYING) {
                             try {
                                 std::lock_guard<std::mutex> llk(lua_mutex);
@@ -9195,7 +9195,7 @@ sol::table result = f_result;
                                 sol::object np = lua["_PERSONA_BASE_PATH"];
                                 if (np.is<std::string>()) out["npc_path"] = np.as<std::string>();
                                 exp = "[GAME STATE]\n" + out.dump(2) + "\n[/GAME STATE]";
-                            } catch (...) { exp = "[ERRORE lettura stato]"; }
+                            } catch (...) { exp = "[ERROR reading state]"; }
                         }
                         user_msg.replace(pos, tag.size(), exp);
                     }
@@ -9217,9 +9217,9 @@ sol::table result = f_result;
                           if (lp.is<std::string>()) log_path = lp.as<std::string>(); }
                         std::string exp;
                         if (log_path.empty()) {
-                            exp = "[GAME LOG non configurato per questa avventura]";
+                            exp = "[GAME LOG not configured for this adventure]";
                         } else {
-                            exp = "[GAME LOG ultime " + std::to_string(n) + " righe — " + log_path + "]\n"
+                            exp = "[GAME LOG last " + std::to_string(n) + " lines — " + log_path + "]\n"
                                 + read_last_lines(log_path, n) + "[/GAME LOG]";
                         }
                         user_msg.replace(pos, end - pos, exp);
@@ -9231,13 +9231,13 @@ sol::table result = f_result;
                     const std::string tag = "@errors";
                     size_t pos;
                     while ((pos = user_msg.find(tag)) != std::string::npos) {
-                        std::string exp = "[ERRORI SCRIPT]\n";
+                        std::string exp = "[SCRIPT ERRORS]\n";
                         { std::lock_guard<std::mutex> g(script_error_mutex);
                           int start = std::max(0, (int)script_error_ring.size() - 10);
-                          if (start >= (int)script_error_ring.size()) exp += "(nessun errore recente)\n";
+                          if (start >= (int)script_error_ring.size()) exp += "(no recent errors)\n";
                           else for (int i = start; i < (int)script_error_ring.size(); ++i)
                               exp += script_error_ring[i] + "\n"; }
-                        exp += "[/ERRORI SCRIPT]";
+                        exp += "[/SCRIPT ERRORS]";
                         user_msg.replace(pos, tag.size(), exp);
                     }
                 }

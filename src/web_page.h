@@ -443,7 +443,7 @@ std::string main_page = R"HTML(<!DOCTYPE html>
       <div id="sb-system-section">
         <hr class="sb-sep">
         <div class="sb-section-hdr" onclick="toggleSection('sb-system-list','sb-sys-toggle')">
-          <span class="sb-label" style="margin:0">Sistema</span>
+          <span class="sb-label" style="margin:0">System</span>
           <span id="sb-sys-toggle" class="sb-toggle open">▶</span>
         </div>
         <ul id="sb-system-list"></ul>
@@ -498,8 +498,8 @@ std::string main_page = R"HTML(<!DOCTYPE html>
         <span id="coder-status-dot"></span>
         <button title="Toggle file tree" onclick="toggleCoderTree()"
                 class="btn btn-ghost" style="margin-left:auto;width:auto;padding:4px 8px">📁</button>
-        <button id="btn-coder-test" class="btn btn-ghost" title="Testa tools e vision sul modello configurato">🔬 Test</button>
-        <button id="btn-coder-compact" class="btn btn-ghost" title="Compatta sessione in coder_memory.md">💾 Compatta</button>
+        <button id="btn-coder-test" class="btn btn-ghost" title="Test tools and vision on the configured model">🔬 Test</button>
+        <button id="btn-coder-compact" class="btn btn-ghost" title="Compact session into coder_memory.md">💾 Compact</button>
         <button id="btn-coder-reset" class="btn btn-ghost">↺ Reset</button>
       </div>
       <div id="coder-body">
@@ -866,7 +866,7 @@ std::string main_page = R"HTML(<!DOCTYPE html>
             </div>
             <div class="sfield">
               <label>Test sentence</label>
-              <input id="s-tts-test-text" type="text" value="Ciao. Sono il narratore di questa avventura." style="width:100%">
+              <input id="s-tts-test-text" type="text" value="Hello. I am the narrator of this adventure." style="width:100%">
             </div>
             <div class="sfield">
               <label>Launch args</label>
@@ -1142,7 +1142,7 @@ function addImage(b64, caption, mime, tooltip, utcAt) {
   const hideBtn = document.createElement('button');
   hideBtn.className = 'img-hide-btn';
   hideBtn.textContent = '✕ nascondi';
-  hideBtn.title = 'Rimuovi dalla storia (permanente per questo salvataggio)';
+  hideBtn.title = 'Remove from story (permanent for this save)';
   hideBtn.onclick = (e) => {
     e.stopPropagation();
     wrap.style.display = 'none';
@@ -1694,9 +1694,9 @@ btnUndo.addEventListener('click', async () => {
     const data = await r.json();
     if (data.success) {
       hud.textContent = data.display || hud.textContent;
-      addMsg('msg-system', '↩ Turno annullato — stato ripristinato.');
+      addMsg('msg-system', '↩ Turn undone — state restored.');
     } else {
-      addMsg('msg-system', 'Undo: ' + (data.error || 'impossibile annullare.'));
+      addMsg('msg-system', 'Undo: ' + (data.error || 'Unable to undo.'));
     }
   } catch (e) {
     addMsg('msg-error', 'Network error during undo.');
@@ -2598,7 +2598,7 @@ async function testNarratorVoice() {
   const voice = document.getElementById('s-tts-narrator-voice').value;
   if (!voice) { alert('Select a narrator voice first, then click Refresh.'); return; }
   const textEl = document.getElementById('s-tts-test-text');
-  const text = (textEl && textEl.value.trim()) || 'Ciao. Sono il narratore di questa avventura.';
+  const text = (textEl && textEl.value.trim()) || 'Hello. I am the narrator of this adventure.';
   try {
     const buf = await fetchTTSBuffer(text, voice);
     if (!buf) { alert('TTS server error or unreachable.'); return; }
@@ -2761,7 +2761,7 @@ async function handleCoderResult(d, loadDiv) {
 
 function startCoderImgPoll(jobId, outputPath) {
   const log = document.getElementById('coder-log');
-  const notice = appendCoderMsg('sys', '⏳ Elaborazione immagine in corso... (1-10 min)');
+  const notice = appendCoderMsg('sys', '⏳ Processing image... (1-10 min)');
   const iv = setInterval(async () => {
     try {
       const r = await fetch('/api/coder/image_job/' + encodeURIComponent(jobId));
@@ -2776,7 +2776,7 @@ function startCoderImgPoll(jobId, outputPath) {
         }).catch(()=>{});
         const wrap = document.createElement('div');
         wrap.className = 'coder-msg ai';
-        wrap.textContent = '✓ Immagine pronta: ' + outputPath;
+        wrap.textContent = '✓ Image ready: ' + outputPath;
         const grid = document.createElement('div');
         grid.className = 'coder-img-grid local-imgs';
         const card = document.createElement('div');
@@ -2800,7 +2800,7 @@ function startCoderImgPoll(jobId, outputPath) {
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify({job_id: jobId, output_path: outputPath, status:'error', error: d.error||'unknown'})
         }).catch(()=>{});
-        appendCoderMsg('sys', '⚠ Errore modifica immagine: ' + (d.error || 'unknown'));
+        appendCoderMsg('sys', '⚠ Image edit error: ' + (d.error || 'unknown'));
       }
       // status === 'running': keep polling
     } catch(e) { /* network hiccup, keep polling */ }
@@ -3019,7 +3019,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('btn-coder-compact').addEventListener('click', () => {
     const ci = document.getElementById('coder-input');
-    ci.value = 'Salva un riassunto conciso di questa sessione in coder_memory.md usando update_coder_memory. Includi: prompt immagini usati (con path), file modificati, decisioni chiave. Massimo 300 parole.';
+    ci.value = 'Save a concise summary of this session in coder_memory.md using update_coder_memory. Include: image prompts used (with paths), files modified, key decisions. Maximum 300 words.';
     coderSend();
   });
 
