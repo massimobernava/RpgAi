@@ -6337,7 +6337,11 @@ sol::table result = f_result;
                 }
             if (!prefix_ok) return false;
             try {
-                fs::path root = fs::weakly_canonical(fs::current_path() / matched);
+                // "matched" carries a trailing '/'; for a not-yet-existing dir
+                // weakly_canonical keeps it, leaving a dangling empty path
+                // component that breaks the prefix comparison below.
+                std::string root_dir = matched.substr(0, matched.size() - 1);
+                fs::path root = fs::weakly_canonical(fs::current_path() / root_dir);
                 fs::path full = fs::weakly_canonical(fs::current_path() / path);
                 auto [it, _] = std::mismatch(root.begin(), root.end(), full.begin(), full.end());
                 return it == root.end();   // full must be at or below root
@@ -6760,10 +6764,31 @@ sol::table result = f_result;
             json a;
             try { a = json::parse(args_json); } catch (...) { a = json::object(); }
 
+            // LLMs frequently emit Windows-style paths (backslashes, "./"
+            // prefix). Every path check and file operation below expects
+            // relative forward-slash paths, so normalize the known path
+            // arguments once, centrally. "url"/"query"/text fields are never
+            // touched.
+            static const char* PATH_ARG_KEYS[] = {
+                "path", "save_path", "output_path", "input_path", "src", "dst",
+                "background_path", "asset_path", "file_path", "filename",
+                "video_path", "output_dir", "frames_dir", "manifest_path",
+                "target_path", "pattern"
+            };
+            for (const char* k : PATH_ARG_KEYS) {
+                if (!a.contains(k) || !a[k].is_string()) continue;
+                std::string p = a[k].get<std::string>();
+                std::string norm = p;
+                std::replace(norm.begin(), norm.end(), '\\', '/');
+                while (norm.rfind("./", 0) == 0) norm = norm.substr(2);
+                if (norm != p) a[k] = norm;
+            }
+
             if (name == "read_file") {
                 std::string path = a.value("path","");
                 if (!is_coder_path_allowed(path))
-                    return json{{"error","path not allowed: "+path}}.dump();
+                    return json{{"error","path not allowed: "+path+
+                        " — use a relative forward-slash path under: scripts/ saves/ images/ my_scripts/ asset/ (e.g. scripts/foo.lua)"}}.dump();
                 std::ifstream f(path);
                 if (!f.good()) return json{{"error","not found: "+path}}.dump();
                 std::string c((std::istreambuf_iterator<char>(f)),
@@ -6875,7 +6900,9 @@ sol::table result = f_result;
             if (name == "write_file") {
                 std::string path    = a.value("path","");
                 std::string content = a.value("content","");
-                if (!is_coder_path_allowed(path)) return json{{"error","path not allowed"}}.dump();
+                if (!is_coder_path_allowed(path))
+                    return json{{"error","path not allowed: "+path+
+                        " — use a relative forward-slash path under: scripts/ saves/ images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 size_t sl = path.rfind('/');
                 if (sl != std::string::npos)
                     std::filesystem::create_directories(path.substr(0, sl));
@@ -6891,7 +6918,9 @@ sol::table result = f_result;
                 std::string path  = a.value("path","");
                 std::string old_s = a.value("old_string","");
                 std::string new_s = a.value("new_string","");
-                if (!is_coder_path_allowed(path)) return json{{"error","path not allowed"}}.dump();
+                if (!is_coder_path_allowed(path))
+                    return json{{"error","path not allowed: "+path+
+                        " — use a relative forward-slash path under: scripts/ saves/ images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 std::ifstream fin(path);
                 if (!fin.good()) return json{{"error","not found: "+path}}.dump();
                 std::string c((std::istreambuf_iterator<char>(fin)),
@@ -6911,7 +6940,9 @@ sol::table result = f_result;
 
             if (name == "delete_file") {
                 std::string path = a.value("path","");
-                if (!is_coder_path_allowed(path)) return json{{"error","path not allowed"}}.dump();
+                if (!is_coder_path_allowed(path))
+                    return json{{"error","path not allowed: "+path+
+                        " — use a relative forward-slash path under: scripts/ saves/ images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 if (std::remove(path.c_str()) != 0) return json{{"error","cannot delete: "+path}}.dump();
                 return json{{"ok",true},{"path",path}}.dump();
             }
@@ -7357,7 +7388,8 @@ sol::table result = f_result;
                 int cw = a.value("w", 0), ch = a.value("h", 0);
                 if (input_path.empty())  return json{{"error","input_path required"}}.dump();
                 if (!is_coder_path_allowed(input_path))
-                    return json{{"error","path not allowed: "+input_path}}.dump();
+                    return json{{"error","path not allowed: "+input_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 if (cw <= 0 || ch <= 0) return json{{"error","w and h must be > 0"}}.dump();
                 if (output_path.empty()) {
                     namespace fs = std::filesystem;
@@ -7478,7 +7510,8 @@ sol::table result = f_result;
                 if (prompt.empty())    return json{{"error","prompt required"}}.dump();
                 if (save_path.empty()) return json{{"error","save_path required"}}.dump();
                 if (!is_coder_path_allowed(save_path))
-                    return json{{"error","path not allowed: "+save_path}}.dump();
+                    return json{{"error","path not allowed: "+save_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 if (img_cfg.provider == ImageProvider::SDCPP_LOCAL &&
                     img_cfg.url.find("localhost") != std::string::npos) {
                     // SDCPP_LOCAL is the fallback — only warn if nothing is actually configured
@@ -7506,7 +7539,8 @@ sol::table result = f_result;
                 if (input_path.empty())  return json{{"error","input_path required"}}.dump();
                 if (instruction.empty()) return json{{"error","instruction required"}}.dump();
                 if (!is_coder_path_allowed(input_path))
-                    return json{{"error","path not allowed: "+input_path}}.dump();
+                    return json{{"error","path not allowed: "+input_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 // Compute default output path: stem + "_edited" + ext
                 if (output_path.empty()) {
                     size_t dot = input_path.rfind('.');
@@ -7515,7 +7549,8 @@ sol::table result = f_result;
                         : input_path + "_edited";
                 }
                 if (!is_coder_path_allowed(output_path))
-                    return json{{"error","output_path not allowed: "+output_path}}.dump();
+                    return json{{"error","output_path not allowed: "+output_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo_edited.png)"}}.dump();
                 std::ifstream f(input_path, std::ios::binary);
                 if (!f.good()) return json{{"error","file not found: "+input_path}}.dump();
                 std::vector<uint8_t> img_bytes(std::istreambuf_iterator<char>(f), {});
@@ -7611,7 +7646,8 @@ sol::table result = f_result;
                 if (prompt.empty())    return json{{"error","prompt required"}}.dump();
                 if (save_path.empty()) return json{{"error","save_path required"}}.dump();
                 if (!is_coder_path_allowed(save_path))
-                    return json{{"error","path not allowed: "+save_path}}.dump();
+                    return json{{"error","path not allowed: "+save_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 json payload = {{"prompt",prompt},{"character_id",char_id},
                                 {"id_scale",id_scale},{"save_as_reference",save_as_ref},
                                 {"faceswap",faceswap}};
@@ -7634,7 +7670,8 @@ sol::table result = f_result;
                 if (prompt.empty())    return json{{"error","prompt required"}}.dump();
                 if (save_path.empty()) return json{{"error","save_path required"}}.dump();
                 if (!is_coder_path_allowed(save_path))
-                    return json{{"error","path not allowed: "+save_path}}.dump();
+                    return json{{"error","path not allowed: "+save_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 json chars_arr = json::array();
                 if (a.contains("chars"))
                     for (auto& c : a["chars"])
@@ -7721,7 +7758,8 @@ sol::table result = f_result;
                 if (!is_coder_path_allowed(input_path))
                     return json{{"error","input_path not allowed: "+input_path}}.dump();
                 if (!is_coder_path_allowed(output_path))
-                    return json{{"error","output_path not allowed: "+output_path}}.dump();
+                    return json{{"error","output_path not allowed: "+output_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo_edited.png)"}}.dump();
                 if (!std::filesystem::exists(input_path))
                     return json{{"error","file not found: "+input_path}}.dump();
                 // Read source image bytes
@@ -7861,7 +7899,8 @@ sol::table result = f_result;
                 std::string input_path = a.value("input_path","");
                 if (input_path.empty()) return json{{"error","input_path required"}}.dump();
                 if (!is_coder_path_allowed(input_path))
-                    return json{{"error","path not allowed: "+input_path}}.dump();
+                    return json{{"error","path not allowed: "+input_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 if (!std::filesystem::exists(input_path))
                     return json{{"error","file not found: "+input_path}}.dump();
                 std::vector<uint8_t> out;
@@ -7879,7 +7918,8 @@ sol::table result = f_result;
                 double threshold       = a.value("threshold", 0.35);
                 if (input_path.empty()) return json{{"error","input_path required"}}.dump();
                 if (!is_coder_path_allowed(input_path))
-                    return json{{"error","path not allowed: "+input_path}}.dump();
+                    return json{{"error","path not allowed: "+input_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 if (!std::filesystem::exists(input_path))
                     return json{{"error","file not found: "+input_path}}.dump();
                 std::string thr_str = std::to_string(threshold);
@@ -7901,7 +7941,8 @@ sol::table result = f_result;
                 if (input_path.empty()) return json{{"error","input_path required"}}.dump();
                 if (npc_id.empty())     return json{{"error","npc_id required"}}.dump();
                 if (!is_coder_path_allowed(input_path))
-                    return json{{"error","path not allowed: "+input_path}}.dump();
+                    return json{{"error","path not allowed: "+input_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo.png)"}}.dump();
                 if (!std::filesystem::exists(input_path))
                     return json{{"error","file not found: "+input_path}}.dump();
                 std::vector<uint8_t> out;
@@ -7924,7 +7965,8 @@ sol::table result = f_result;
                 if (!is_coder_path_allowed(input_path))
                     return json{{"error","input_path not allowed: "+input_path}}.dump();
                 if (!is_coder_path_allowed(output_path))
-                    return json{{"error","output_path not allowed: "+output_path}}.dump();
+                    return json{{"error","output_path not allowed: "+output_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo_edited.png)"}}.dump();
                 if (!std::filesystem::exists(input_path))
                     return json{{"error","file not found: "+input_path}}.dump();
                 std::string parts        = a.value("parts","");
@@ -7976,7 +8018,8 @@ sol::table result = f_result;
                 if (!is_coder_path_allowed(target_path))
                     return json{{"error","target_path not allowed: "+target_path}}.dump();
                 if (!is_coder_path_allowed(output_path))
-                    return json{{"error","output_path not allowed: "+output_path}}.dump();
+                    return json{{"error","output_path not allowed: "+output_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo_edited.png)"}}.dump();
                 if (!std::filesystem::exists(target_path))
                     return json{{"error","file not found: "+target_path}}.dump();
                 bool enhance = a.value("enhance", false);
@@ -8058,7 +8101,8 @@ sol::table result = f_result;
                 if (!is_coder_path_allowed(input_path))
                     return json{{"error","input_path not allowed: "+input_path}}.dump();
                 if (!is_coder_path_allowed(output_path))
-                    return json{{"error","output_path not allowed: "+output_path}}.dump();
+                    return json{{"error","output_path not allowed: "+output_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo_edited.png)"}}.dump();
                 if (!std::filesystem::exists(input_path))
                     return json{{"error","file not found: "+input_path}}.dump();
                 std::vector<uint8_t> out;
@@ -8096,7 +8140,8 @@ sol::table result = f_result;
                 if (!is_coder_path_allowed(input_path))
                     return json{{"error","input_path not allowed: "+input_path}}.dump();
                 if (!is_coder_path_allowed(output_path))
-                    return json{{"error","output_path not allowed: "+output_path}}.dump();
+                    return json{{"error","output_path not allowed: "+output_path+
+                        " — use a relative forward-slash path under: images/ my_scripts/ asset/ (e.g. images/foo_edited.png)"}}.dump();
                 if (!std::filesystem::exists(input_path))
                     return json{{"error","file not found: "+input_path}}.dump();
                 std::string scale_str = std::to_string(scale);
