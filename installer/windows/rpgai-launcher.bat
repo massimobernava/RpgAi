@@ -41,6 +41,7 @@ if %FIRST_RUN%==1 (
     )
 )
 
-start "" "http://localhost:%PORT%"
+:: Browser is opened by the engine itself (--web), right after the port binds.
+:: Do NOT add a second "start http://..." here — it would open a duplicate tab.
 
 endlocal
