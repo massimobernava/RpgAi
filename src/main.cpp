@@ -1550,6 +1550,13 @@ bool parse_args(int argc, char* argv[]) {
 int main(int argc, char* argv[]) {
     init_ansi();
 
+    // The engine speaks UTF-8 everywhere (incl. translated strings); without
+    // this a Russian-locale console renders them as mojibake.
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+
     load_settings_file();              // base: file-saved settings
     if (!parse_args(argc, argv)) return 1;  // CLI overrides file
 
