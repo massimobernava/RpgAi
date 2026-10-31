@@ -91,19 +91,42 @@ static void strip_unsupported_constraints(json& node) {
     }
 }
 
+// Some strict OpenAI-compatible backends (e.g. Azure deployments behind
+// gateways like zveno.ai) enforce OpenAI strict-mode schema rules that public
+// OpenAI merely coerces: every object that declares "properties" must
+// explicitly set "additionalProperties": false AND "required" must list every
+// key in "properties". Scripts target public OpenAI and omit both, so supply
+// them here recursively for generic targets — but only on objects that already
+// declare "properties", so intentionally open-ended maps ({"type":"object"}
+// without properties) stay open. Google rejects the key outright and
+// Anthropic ignores structural constraints, so both are excluded.
+static void normalize_strict_schema(json& node) {
+    if (!node.is_object()) return;
+    if (node.contains("properties") && node["properties"].is_object()) {
+        if (!node.contains("additionalProperties"))
+            node["additionalProperties"] = false;
+        json req = json::array();
+        for (auto& [k, v] : node["properties"].items()) req.push_back(k);
+        node["required"] = std::move(req);
+    }
+    for (auto& [k, v] : node.items()) normalize_strict_schema(v);
+}
+
 // Parse a JSON-Schema string and adapt it to the target model:
 // Google rejects "additionalProperties"; Anthropic (incl. via OpenRouter, model
 // strings like "anthropic/..." or containing "claude") rejects min/max and
 // minItems/maxItems. Central place so every response_format site stays consistent.
 static json schema_for_model(const std::string& schema_str, const std::string& model) {
     json s = json::parse(schema_str);
-    if (model.rfind("google/", 0) == 0) strip_additional_properties(s);
+    bool is_google = model.rfind("google/", 0) == 0;
+    if (is_google) strip_additional_properties(s);
     bool is_anthropic = model.find("claude")    != std::string::npos
                      || model.find("anthropic") != std::string::npos
                      || model.find("sonnet")    != std::string::npos
                      || model.find("opus")      != std::string::npos
                      || model.find("haiku")     != std::string::npos;
     if (is_anthropic) strip_unsupported_constraints(s);
+    else if (!is_google) normalize_strict_schema(s);
     return s;
 }
 
