@@ -430,7 +430,7 @@ std::string main_page = R"HTML(<!DOCTYPE html>
 
     <!-- In-game section -->
     <div id="section-game">
-      <div class="sb-label">Script attivo</div>
+      <div class="sb-label">Active script</div>
       <div id="info-script" class="sb-value">—</div>
       <div class="sb-label">Save File</div>
       <div id="info-save" class="sb-value">—</div>
@@ -1101,7 +1101,7 @@ function showPreUI() {
 function showGameUI(scriptName, saveName) {
   secPre.style.display  = 'none';
   secGame.style.display = 'flex';
-  infoScript.textContent = scriptName || 'sconosciuto';
+  infoScript.textContent = scriptName || 'unknown';
   infoSave.textContent   = saveName   || '(default)';
 }
 
@@ -1141,7 +1141,7 @@ function addImage(b64, caption, mime, tooltip, utcAt) {
   // Hide button (top-left, visible on hover)
   const hideBtn = document.createElement('button');
   hideBtn.className = 'img-hide-btn';
-  hideBtn.textContent = '✕ nascondi';
+  hideBtn.textContent = '✕ hide';
   hideBtn.title = 'Rimuovi dalla storia (permanente per questo salvataggio)';
   hideBtn.onclick = (e) => {
     e.stopPropagation();
@@ -1644,7 +1644,7 @@ btnLoad.addEventListener('click', async () => {
 
     const replayAsync = async () => {
       if (turns.length > 0) {
-        addMsg('msg-system', '── Storia precedente (' + turns.length + ' turni) ──');
+        addMsg('msg-system', '── Previous story (' + turns.length + (turns.length === 1 ? ' turn' : ' turns') + ') ──');
         // Images that predate all turns
         if (imgAfterTurn[-1]) await loadAndShowImages(imgAfterTurn[-1]);
         for (let i = 0; i < turns.length; i++) {
@@ -1653,9 +1653,9 @@ btnLoad.addEventListener('click', async () => {
           if (t.narration)    addMsg('msg-narration', t.narration);
           if (imgAfterTurn[i]) await loadAndShowImages(imgAfterTurn[i]);
         }
-        addMsg('msg-system', '── Fine storia precedente ──');
+        addMsg('msg-system', '── End of previous story ──');
       } else {
-        addMsg('msg-system', 'Partita ripristinata.');
+        addMsg('msg-system', 'Game restored.');
       }
     };
     replayAsync();

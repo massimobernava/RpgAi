@@ -2493,7 +2493,7 @@ int main(int argc, char* argv[]) {
         bool turn_ok = false;
         if (script_has_tools) {
             static int tool_turn = 0;
-            std::cerr << "\033[2m── TURNO " << ++tool_turn
+            std::cerr << "\033[2m── TURN " << ++tool_turn
                       << " ──────────────────────────────────────\033[0m\n";
         }
         for (int attempt = 0; attempt < cfg.maxRetries && !turn_ok; ++attempt) {
@@ -2712,7 +2712,7 @@ sol::table result = f_result;
 
             if (script_has_tools) {
                 static int web_tool_turn = 0;
-                std::cerr << "\033[2m── TURNO " << ++web_tool_turn
+                std::cerr << "\033[2m── TURN " << ++web_tool_turn
                           << " ──────────────────────────────────────\033[0m\n";
             }
             for (int attempt = 0; attempt < cfg.maxRetries; ++attempt) {

@@ -765,7 +765,7 @@ static std::string openai_tool_loop(
             fresh.push_back({{"role",m.role},{"content",m.content}});
         if (!user_prompt.empty())
             fresh.push_back({{"role","user"},{"content",user_prompt +
-                "\n\n[I tool sono stati eseguiti. Scrivi la narrazione adesso nel formato JSON richiesto.]"}});
+                "\n\n[Tools have been executed. Now write the narration in the required JSON format.]"}});
         std::string r2 = one_shot_call(fresh);
         return r2.empty() ? "{\"error\":\"rescue failed\"}" : r2;
     };
