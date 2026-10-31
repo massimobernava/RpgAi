@@ -7600,6 +7600,37 @@ sol::table result = f_result;
                 return json{{"ok",true},{"path",save_path},{"bytes",(int)result.size()}}.dump();
             };
 
+            // Guard for the t2i_locale tools below (generate_portrait /
+            // generate_scene / t2i_reference). They bind to the LOCAL
+            // t2i_locale server; when --img-url points at a cloud image API
+            // (e.g. zveno.ai) the generic endpoints still answer — its own
+            // /health returns 200, which misleads — but t2i-specific routes
+            // 404. Probe /references once per process and fail with an
+            // actionable message instead of a raw 404.
+            const char* T2I_NEEDED_MSG =
+                "this tool requires the LOCAL t2i_locale server (FLUX + PuLID) at --img-url; "
+                "the configured image URL is a cloud API without t2i endpoints — "
+                "use the portrait as a regular asset instead (save under images/ or "
+                "my_scripts/ and reference it from the script's asset table)";
+            auto t2i_server_guard = [&]() -> std::string {
+                static int state = 0;   // 0 unknown, 1 = t2i_locale, 2 = not t2i_locale
+                if (state == 1) return "";
+                if (img_cfg.url.empty())
+                    return "t2i server URL not configured (--img-url must point to the local t2i_locale server)";
+                if (state == 2) return T2I_NEEDED_MSG;
+                std::string resp = http_get_coder(img_cfg.url + "/references",
+                                                  {"Accept: application/json"});
+                // t2i_locale answers with a JSON array of references; cloud
+                // APIs answer with a JSON *error object* for unknown routes,
+                // which must not count as "server present".
+                try {
+                    auto j = json::parse(resp);
+                    if (j.is_array()) { state = 1; return ""; }
+                } catch (...) {}
+                state = 2;
+                return T2I_NEEDED_MSG;
+            };
+
             if (name == "generate_portrait") {
                 std::string prompt    = a.value("prompt","");
                 std::string save_path = a.value("save_path","");
@@ -7612,6 +7643,7 @@ sol::table result = f_result;
                 if (save_path.empty()) return json{{"error","save_path required"}}.dump();
                 if (!is_coder_path_allowed(save_path))
                     return json{{"error","path not allowed: "+save_path}}.dump();
+                { std::string g = t2i_server_guard(); if (!g.empty()) return json{{"error",g}}.dump(); }
                 json payload = {{"prompt",prompt},{"character_id",char_id},
                                 {"id_scale",id_scale},{"save_as_reference",save_as_ref},
                                 {"faceswap",faceswap}};
@@ -7635,6 +7667,7 @@ sol::table result = f_result;
                 if (save_path.empty()) return json{{"error","save_path required"}}.dump();
                 if (!is_coder_path_allowed(save_path))
                     return json{{"error","path not allowed: "+save_path}}.dump();
+                { std::string g = t2i_server_guard(); if (!g.empty()) return json{{"error",g}}.dump(); }
                 json chars_arr = json::array();
                 if (a.contains("chars"))
                     for (auto& c : a["chars"])
@@ -7654,8 +7687,7 @@ sol::table result = f_result;
                 std::string action   = a.value("action","");
                 std::string char_id  = a.value("char_id","");
                 std::string file_path = a.value("file_path","");
-                if (img_cfg.url.empty())
-                    return json{{"error","t2i server URL not configured (--img-url)"}}.dump();
+                { std::string g = t2i_server_guard(); if (!g.empty()) return json{{"error",g}}.dump(); }
                 std::string base = img_cfg.url;
 
                 if (action == "list" || action == "health") {
