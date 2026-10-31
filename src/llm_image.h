@@ -75,7 +75,8 @@ using nlohmann::json;
 
 enum class ImageProvider {
     SDCPP_LOCAL,     // stable-diffusion.cpp local server (t2i + i2i)
-    OPENAI_IMAGE,    // OpenAI DALL-E / GPT-image-1
+    OPENAI_IMAGE,    // OpenAI DALL-E / GPT-image-1 (canonical api.openai.com API)
+    CUSTOM_OPENAI,   // generic OpenAI-compatible gateway (zveno.ai, OpenRouter-style routers)
     OPENROUTER_IMG,  // OpenRouter image models
     FAL_AI,          // fal.ai — supporta Qwen-Image-Edit-2511 e altri
     DASHSCOPE,       // Alibaba Cloud DashScope — modelli Qwen-Image nativi
@@ -217,10 +218,12 @@ static std::string sniff_image_ext(const std::vector<uint8_t>& b) {
     return ".jpg";
 }
 
-// Performs an HTTP POST with JSON body, returns response body
+// Performs an HTTP POST with JSON body, returns response body.
+// Generous default timeout: image models routinely take 60-300s+.
 static std::string http_post_json(const std::string& url,
                                    const std::string& body,
-                                   const std::string& auth_header = "") {
+                                   const std::string& auth_header = "",
+                                   long timeout_s = 600) {
     CURL* curl = make_curl();
     if (!curl) throw std::runtime_error("[IMG] curl_easy_init failed");
 
@@ -235,7 +238,7 @@ static std::string http_post_json(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS,     body.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,  write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,      &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,        60L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,        timeout_s);
 
     CURLcode rc = curl_easy_perform(curl);
     long code = http_status(curl);
@@ -328,7 +331,7 @@ static std::string http_post_multipart(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_MIMEPOST,      form);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       120L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       600L);
 
     CURLcode rc = curl_easy_perform(curl);
     long code = http_status(curl);
@@ -466,7 +469,7 @@ static std::vector<uint8_t> http_post_faceswap_raw(
     curl_easy_setopt(curl, CURLOPT_MIMEPOST,      form);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_bytes_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &result);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       120L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       600L);
 
     CURLcode rc = curl_easy_perform(curl);
     long code = http_status(curl);
@@ -1242,8 +1245,13 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
 // ---------------------------------------------------------------------------
 // OPENAI_IMAGE — DALL-E 3 / GPT-image-1
 //
+// Canonical api.openai.com behavior only:
 // text-to-image: POST /v1/images/generations  (JSON, responds with b64_json)
 // image-to-image: POST /v1/images/edits       (multipart)
+//
+// For OpenAI-compatible gateways with non-standard image APIs (minimal
+// /v1/images, or image models served only via chat completions — e.g.
+// zveno.ai, OpenRouter-style routers) use the CUSTOM_OPENAI provider.
 // ---------------------------------------------------------------------------
 
 namespace openai_img {
@@ -1251,6 +1259,93 @@ namespace openai_img {
 static std::string auth_header() {
     const std::string& key = img_cfg.key.empty() ? openai_api_key : img_cfg.key;
     return "Authorization: Bearer " + key;
+}
+
+// Decode an image reference: a "data:<mime>;base64,<payload>" data URL or an
+// http(s) URL (downloaded).
+static std::vector<uint8_t> image_from_ref(const std::string& ref) {
+    if (ref.rfind("data:", 0) == 0) {
+        auto comma = ref.find(',');
+        if (comma == std::string::npos)
+            throw std::runtime_error("[IMG] openai: malformed image data URL");
+        return base64_to_bytes(ref.substr(comma + 1));
+    }
+    std::string bytes = img_detail::http_get(ref);
+    return std::vector<uint8_t>(bytes.begin(), bytes.end());
+}
+
+// Extract image bytes from one response item, covering the variants:
+//   images API: {"b64_json": ...} or {"url": "https://..."}
+//   chat API:   {"type": "image_url", "image_url": {"url": "data:..."}}
+static std::vector<uint8_t> image_from_item(const json& item) {
+    if (item.contains("b64_json") && item["b64_json"].is_string())
+        return base64_to_bytes(item["b64_json"].get<std::string>());
+    if (item.contains("url") && item["url"].is_string())
+        return image_from_ref(item["url"].get<std::string>());
+    if (item.contains("image_url") && item["image_url"].is_object()
+        && item["image_url"].contains("url"))
+        return image_from_ref(item["image_url"]["url"].get<std::string>());
+    throw std::runtime_error("[IMG] openai: response item has no usable image");
+}
+
+// Chat-completions image call (OpenRouter style). With source_bytes empty it
+// is a text-to-image request; with the source image attached it is an edit.
+// Model choice: i2i_model for edits, t2i_model for plain generation.
+static std::string post_chat_image(const std::string& prompt,
+                                   const std::vector<uint8_t>* source_bytes) {
+    std::string chat_model = source_bytes
+        ? (img_cfg.i2i_model.empty() ? img_cfg.t2i_model : img_cfg.i2i_model)
+        : (img_cfg.t2i_model.empty() ? img_cfg.i2i_model : img_cfg.t2i_model);
+    if (chat_model.empty())
+        throw std::runtime_error("[IMG] openai: no t2i/i2i model configured");
+
+    json content = json::array();
+    if (source_bytes) {
+        content.push_back({{"type", "image_url"},
+                           {"image_url", {{"url", "data:image/png;base64,"
+                                                  + bytes_to_base64(*source_bytes)}}}});
+    }
+    content.push_back({{"type", "text"}, {"text", prompt}});
+
+    json req;
+    req["model"]      = chat_model;
+    req["modalities"] = json::array({"image"});
+    req["messages"]   = json::array({
+        {{"role", "user"}, {"content", content}}
+    });
+
+    return img_detail::http_post_json(
+        img_cfg.url + "/v1/chat/completions", req.dump(), auth_header());
+}
+
+// Extract the image from a chat-completions response. Gateways return it in
+// choices[].message.images[].image_url.url (data URL); OpenAI natively uses a
+// content array with image parts.
+static std::vector<uint8_t> image_from_chat_response(const std::string& resp) {
+    auto j = json::parse(resp);
+    if (j.contains("error")) {
+        std::string msg = j["error"].is_object()
+            ? j["error"].value("message", resp)
+            : j["error"].get<std::string>();
+        throw std::runtime_error("[IMG] openai (chat): " + msg);
+    }
+    if (!j.contains("choices") || j["choices"].empty())
+        throw std::runtime_error("[IMG] openai (chat): no choices in response: "
+                                 + resp.substr(0, 200));
+
+    const json& msg = j["choices"][0]["message"];
+    if (msg.contains("images") && !msg["images"].empty()) {
+        // Gateways may prepend intermediate renders (e.g. Gemini thinking
+        // images); the final render is the LAST element.
+        return image_from_item(msg["images"][msg["images"].size() - 1]);
+    }
+    if (msg.contains("content") && msg["content"].is_array()) {
+        for (const auto& part : msg["content"]) {
+            try { return image_from_item(part); } catch (const std::exception&) {}
+        }
+    }
+    throw std::runtime_error("[IMG] openai (chat): no image in response: "
+                             + resp.substr(0, 200));
 }
 
 inline std::vector<uint8_t> txt2img(const std::string& prompt) {
@@ -1269,7 +1364,7 @@ inline std::vector<uint8_t> txt2img(const std::string& prompt) {
     if (!j.contains("data") || j["data"].empty())
         throw std::runtime_error("[IMG] openai txt2img: no data in response");
 
-    return base64_to_bytes(j["data"][0]["b64_json"].get<std::string>());
+    return image_from_item(j["data"][0]);
 }
 
 inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
@@ -1286,10 +1381,153 @@ inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
     if (!j.contains("data") || j["data"].empty())
         throw std::runtime_error("[IMG] openai img2img: no data in response: " + resp);
 
-    return base64_to_bytes(j["data"][0]["b64_json"].get<std::string>());
+    return image_from_item(j["data"][0]);
 }
 
 } // namespace openai_img
+
+// ---------------------------------------------------------------------------
+// CUSTOM_OPENAI — generic OpenAI-compatible gateways (zveno.ai, and any
+// OpenRouter-style router). Unlike OPENAI_IMAGE (canonical api.openai.com
+// behavior only), this provider negotiates the dialect at runtime and
+// remembers the working mode:
+//   t2i: POST /v1/images/generations → minimal POST /v1/images →
+//        POST /v1/chat/completions (text-only user message + modalities)
+//   i2i: multipart POST /v1/images/edits → POST /v1/images with the source
+//        image as a data URL in input_references → POST /v1/chat/completions
+//        with the source image inline (edited image back in
+//        choices[].message.images[].image_url.url)
+//
+// Gateways classify image models into two families: image_generation-class
+// models (gpt-image-*, seedream, recraft — served by /v1/images, editing via
+// input_references) and chat-class image models (gemini-*-image — served
+// only via chat completions). The chain adapts automatically.
+// ---------------------------------------------------------------------------
+
+namespace custom_img {
+
+// zveno-style editing through the unified Images API: JSON body, source
+// image as a data URL in input_references (documented at
+// zveno.ai/docs/guides/image-generation). Unlike multipart /v1/images/edits
+// this works for image_generation-class models (gpt-image-*, seedream, ...),
+// which gateways usually do not serve via chat completions either.
+// model must not be empty here: /v1/images requires it.
+static std::string post_images_edit(const std::string& prompt,
+                                    const std::vector<uint8_t>& src,
+                                    const std::string& model) {
+    std::string m = model.empty() ? img_cfg.t2i_model : model;
+    if (m.empty())
+        throw std::runtime_error("[IMG] custom: no model configured");
+    json req;
+    req["prompt"] = prompt;
+    req["model"]  = m;
+    req["input_references"] = json::array({
+        "data:image/png;base64," + bytes_to_base64(src)});
+    return img_detail::http_post_json(
+        img_cfg.url + "/v1/images", req.dump(), openai_img::auth_header());
+}
+
+inline std::vector<uint8_t> txt2img(const std::string& prompt) {
+    json req;
+    req["prompt"]           = prompt;
+    req["n"]                = 1;
+    req["size"]             = std::to_string(img_cfg.width) + "x"
+                              + std::to_string(img_cfg.height);
+    req["response_format"]  = "b64_json";
+    if (!img_cfg.t2i_model.empty()) req["model"] = img_cfg.t2i_model;
+
+    // 0 = unknown, 1 = /v1/images/generations, 2 = minimal /v1/images,
+    // 3 = chat completions
+    static int path_mode = 0;
+
+    if (path_mode == 3)
+        return openai_img::image_from_chat_response(
+            openai_img::post_chat_image(prompt, nullptr));
+
+    std::string resp;
+    if (path_mode == 2) {
+        json mreq;
+        mreq["prompt"] = prompt;
+        if (!img_cfg.t2i_model.empty()) mreq["model"] = img_cfg.t2i_model;
+        resp = img_detail::http_post_json(
+            img_cfg.url + "/v1/images", mreq.dump(), openai_img::auth_header());
+    } else {
+        try {
+            resp = img_detail::http_post_json(
+                img_cfg.url + "/v1/images/generations", req.dump(),
+                openai_img::auth_header());
+            path_mode = 1;
+        } catch (const std::exception&) {
+            try {
+                json mreq;
+                mreq["prompt"] = prompt;
+                if (!img_cfg.t2i_model.empty()) mreq["model"] = img_cfg.t2i_model;
+                resp = img_detail::http_post_json(
+                    img_cfg.url + "/v1/images", mreq.dump(),
+                    openai_img::auth_header());
+                path_mode = 2;
+            } catch (const std::exception&) {
+                path_mode = 3;
+                return openai_img::image_from_chat_response(
+                    openai_img::post_chat_image(prompt, nullptr));
+            }
+        }
+    }
+
+    auto j = json::parse(resp);
+    if (!j.contains("data") || j["data"].empty())
+        throw std::runtime_error("[IMG] custom txt2img: no data in response");
+
+    return openai_img::image_from_item(j["data"][0]);
+}
+
+inline std::vector<uint8_t> img2img(const std::vector<uint8_t>& collage_bytes,
+                                     const std::string& prompt) {
+    std::string size_str = std::to_string(img_cfg.width) + "x"
+                         + std::to_string(img_cfg.height);
+    std::string model = img_cfg.i2i_model.empty() ? "" : img_cfg.i2i_model;
+
+    // 0 = unknown, 1 = multipart /v1/images/edits,
+    // 2 = /v1/images with input_references, 3 = chat completions
+    static int path_mode = 0;
+
+    if (path_mode == 3)
+        return openai_img::image_from_chat_response(
+            openai_img::post_chat_image(prompt, &collage_bytes));
+
+    std::string resp;
+    if (path_mode == 1) {
+        resp = img_detail::http_post_multipart(
+            img_cfg.url + "/v1/images/edits",
+            openai_img::auth_header(), prompt, collage_bytes, model, 1, size_str);
+    } else if (path_mode == 2) {
+        resp = post_images_edit(prompt, collage_bytes, model);
+    } else {
+        try {
+            resp = img_detail::http_post_multipart(
+                img_cfg.url + "/v1/images/edits",
+                openai_img::auth_header(), prompt, collage_bytes, model, 1, size_str);
+            path_mode = 1;
+        } catch (const std::exception&) {
+            try {
+                resp = post_images_edit(prompt, collage_bytes, model);
+                path_mode = 2;
+            } catch (const std::exception&) {
+                path_mode = 3;
+                return openai_img::image_from_chat_response(
+                    openai_img::post_chat_image(prompt, &collage_bytes));
+            }
+        }
+    }
+
+    auto j = json::parse(resp);
+    if (!j.contains("data") || j["data"].empty())
+        throw std::runtime_error("[IMG] custom img2img: no data in response: " + resp);
+
+    return openai_img::image_from_item(j["data"][0]);
+}
+
+} // namespace custom_img
 
 // ---------------------------------------------------------------------------
 // OPENROUTER_IMG — OpenRouter image models
@@ -2019,6 +2257,7 @@ inline std::vector<uint8_t> text_to_image(const std::string& prompt,
     std::vector<uint8_t> result;
     switch (img_cfg.provider) {
         case ImageProvider::OPENAI_IMAGE:    result = openai_img::txt2img(prompt);     break;
+        case ImageProvider::CUSTOM_OPENAI:   result = custom_img::txt2img(prompt);     break;
         case ImageProvider::OPENROUTER_IMG:  result = openrouter_img::txt2img(prompt); break;
         case ImageProvider::DASHSCOPE:       result = dashscope::txt2img(prompt);      break;
         case ImageProvider::AIMLAPI:         result = aimlapi::txt2img(prompt);        break;
@@ -2122,6 +2361,7 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
     std::vector<uint8_t> result;
     switch (p) {
         case ImageProvider::OPENAI_IMAGE:    result = openai_img::img2img(i2i_source, prompt);     break;
+        case ImageProvider::CUSTOM_OPENAI:   result = custom_img::img2img(i2i_source, prompt);     break;
         case ImageProvider::OPENROUTER_IMG:  result = openrouter_img::img2img(i2i_source, prompt); break;
         case ImageProvider::FAL_AI:          result = fal_ai::img2img(i2i_source, prompt);          break;
         case ImageProvider::DASHSCOPE:       result = dashscope::img2img(i2i_source, prompt);       break;
@@ -2251,6 +2491,7 @@ inline std::vector<uint8_t> image_to_image(const std::vector<uint8_t>& collage_b
 
 inline ImageProvider img_provider_from_string(const std::string& s) {
     if (s == "openai")     return ImageProvider::OPENAI_IMAGE;
+    if (s == "custom" || s == "custom_openai") return ImageProvider::CUSTOM_OPENAI;
     if (s == "openrouter") return ImageProvider::OPENROUTER_IMG;
     if (s == "fal")        return ImageProvider::FAL_AI;
     if (s == "fal_ai")     return ImageProvider::FAL_AI;
@@ -2275,7 +2516,9 @@ inline void print_image_help() {
         std::cout << line << "\n";
     };
     std::cout << "\nIMAGE GENERATION\n";
-    opt("--img-provider <n>",    "sdcpp_local|openai|openrouter|fal|dashscope|aimlapi|wavespeed|qwen_local", "sdcpp_local");
+    opt("--img-provider <n>",    "sdcpp_local|openai|custom|openrouter|fal|dashscope|aimlapi|wavespeed|qwen_local", "sdcpp_local");
+    opt("",  "  custom = generic OpenAI-compatible gateway (auto-detects: standard /v1/images,", "");
+    opt("",  "  minimal /v1/images, or chat-completions image models — e.g. zveno.ai)", "");
     opt("--img-i2i-provider <n>",  "dedicated i2i provider (if different from --img-provider)", "");
     opt("--img-url <url>",       "local image server URL",         img_cfg.url);
     opt("--img-key <key>",       "API key (default: LLM provider key)", "");
